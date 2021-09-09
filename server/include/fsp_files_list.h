@@ -1,5 +1,5 @@
 // Lista contenente i file.
-// Struttura dati usata per tenere traccia dei file aperti da ogni client.
+// Struttura dati che tiene traccia dei file aperti da ogni client.
 // La lista è ordinata lessicograficamente in ordine crescente dei nomi dei file.
 
 #ifndef FSP_FILES_LIST_H
