@@ -13,25 +13,29 @@ struct fsp_file {
     // Numero degli utenti che hanno aperto il file
     unsigned int links;
     // sfd del client che ha la lock sul file
-    // loccked < 0 se la lock non è stata settata
+    // locked < 0 se la lock non è stata settata
     int locked;
     // Indica se il file deve essere rimosso quando links == 0
-    // Non è possibile aprire il file se remove == 1
-    int remove;
+    // Se remove == 1 non sarà possibile eseguire operazioni su di esso tranne la chiusura
+    unsigned short int remove;
     
-    // Campi usati per la gestione dell'albero binario di ricerca
-    // Padre
-    struct fsp_file* parent;
-    // Sottoalbero sinistro
-    struct fsp_file* left;
-    // Sottoalbero destro
-    struct fsp_file* right;
+    // Campi usati per la gestione della tabella hash
+    // Nodo precedente
+    struct fsp_file* hash_table_prev;
+    // Nodo successivo
+    struct fsp_file* hash_table_next;
+    
+    // Campi usati per la gestione della coda FIFO
+    // Nodo precedente
+    struct fsp_file* queue_prev;
+    // Nodo successivo
+    struct fsp_file* queue_next;
 };
 
 /**
  * \brief Alloca memoria per un nuovo file e lo restituisce.
  *        I campi della struttura fsp_file conterranno i rispettivi valori degli argomenti
- *        passati alla funzione.
+ *        passati alla funzione. Usare la funzione fsp_file_free per liberare il file dalla memoria.
  *
  * \return Il nuovo file,
  *         NULL se non è stato possibile allocare la memoria.

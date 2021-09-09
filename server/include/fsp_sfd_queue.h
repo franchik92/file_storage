@@ -1,4 +1,5 @@
-// Coda FIFO contenente i socket file descriptors da passare ai thread worker.
+// Coda FIFO contenente i socket file descriptor.
+// Struttura dati usata per comunicare i socket file descriptor ai thread worker.
 
 #ifndef FSP_SFD_QUEUE_H
 #define FSP_SFD_QUEUE_H

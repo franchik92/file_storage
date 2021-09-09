@@ -13,7 +13,7 @@
 #include <fsp_files_list.h>
 #include <fsp_clients_hash_table.h>
 #include <fsp_sfd_queue.h>
-#include <fsp_pathnames_queue.h>
+#include <fsp_files_queue.h>
 #include <fsp_parser.h>
 #include <fsp_reader.h>
 #include <utils.h>
@@ -28,7 +28,7 @@
 typedef struct fsp_file* FILES;
 typedef struct clients_hash_table* CLIENTS;
 typedef struct fsp_sfd_queue* SFD_QUEUE;
-typedef struct fsp_pathnames_queue* PATHNAMES_QUEUE;
+typedef struct fsp_files_queue* PATHNAMES_QUEUE;
 typedef struct fsp_files_list* OPENED_FILES;
 typedef struct client_info* CLIENT_INFO;
 
@@ -159,7 +159,7 @@ int main(int argc, const char* argv[]) {
         fsp_clients_hash_table_free(clients);
         return -1;
     }
-    if((pathnames_queue = fsp_pathnames_queue_new()) == NULL) {
+    if((pathnames_queue = fsp_files_queue_new()) == NULL) {
         fprintf(stderr, "Errore: memoria insufficiente.\n");
         fsp_clients_hash_table_free(clients);
         fsp_sfd_queue_free(sfd_queue);
@@ -732,7 +732,7 @@ int append_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_
                         
                         long int wrote_bytes_tot = 0;
                         long int wrote_bytes = 0;
-                        _file_pathname = fsp_pathnames_queue_dequeue(pathnames_queue);
+                        _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
                         _file = fsp_files_bst_search(files, _file_pathname->pathname);
                         wrote_bytes = fsp_parser_makeData(data, &_tot_size, 0, n, pathname, _file->size, _file->data);
                         if(wrote_bytes < 0) {
@@ -741,7 +741,7 @@ int append_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_
                         }
                         wrote_bytes_tot += wrote_bytes;
                         for(int i = 0; i < n-1; i++) {
-                            _file_pathname = fsp_pathnames_queue_dequeue(pathnames_queue);
+                            _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
                             _file = fsp_files_bst_search(files, _file_pathname->pathname);
                             wrote_bytes = fsp_parser_makeData(data, &_tot_size, wrote_bytes, n, pathname, _file->size, _file->data);
                             if(wrote_bytes < 0) {
@@ -1334,7 +1334,7 @@ int write_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_d
                         
                         long int wrote_bytes_tot = 0;
                         long int wrote_bytes = 0;
-                        _file_pathname = fsp_pathnames_queue_dequeue(pathnames_queue);
+                        _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
                         _file = fsp_files_bst_search(files, _file_pathname->pathname);
                         wrote_bytes = fsp_parser_makeData(data, &_tot_size, 0, n, pathname, _file->size, _file->data);
                         if(wrote_bytes < 0) {
@@ -1343,7 +1343,7 @@ int write_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_d
                         }
                         wrote_bytes_tot += wrote_bytes;
                         for(int i = 0; i < n-1; i++) {
-                            _file_pathname = fsp_pathnames_queue_dequeue(pathnames_queue);
+                            _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
                             _file = fsp_files_bst_search(files, _file_pathname->pathname);
                             wrote_bytes = fsp_parser_makeData(data, &_tot_size, wrote_bytes, n, pathname, _file->size, _file->data);
                             if(wrote_bytes < 0) {

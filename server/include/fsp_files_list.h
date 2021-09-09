@@ -1,22 +1,30 @@
-// Lista di file.
+// Lista contenente i file.
+// Struttura dati usata per tenere traccia dei file aperti da ogni client.
+// La lista è ordinata lessicograficamente in ordine crescente dei nomi dei file.
 
 #ifndef FSP_FILES_LIST_H
 #define FSP_FILES_LIST_H
 
 #include <stdio.h>
+
 #include <fsp_file.h>
 
 struct fsp_files_list {
+    // File
     struct fsp_file* file;
-    struct file_list* next;
+    // Nodo precedente
+    struct fsp_files_list* prev;
+    // Nodo successivo
+    struct fsp_files_list* next;
 };
 
 /**
  * \brief Aggiunge file alla lista *list.
  *
  * \return 0 in caso di successo,
- *         -1 se list == NULL || file == NULL,
- *         -2 se non è stato possibile allocare la memoria.
+ *         -1 se list == NULL || *list == NULL || file == NULL,
+ *         -2 se file è già presente nella lista,
+ *         -3 se non è stato possibile allocare la memoria.
  */
 int fsp_files_list_add(struct fsp_files_list** list, struct fsp_file* file);
 
@@ -32,7 +40,7 @@ int fsp_files_list_contains(struct fsp_files_list* list, const char* pathname);
  * \brief Rimuove dalla lista *list il file con nome pathname.
  *
  * \return Il file,
- *         NULL se list == NULL || pathname == NULL || il file non è presente.
+ *         NULL se list == NULL || *list == NULL || pathname == NULL || il file non è presente.
  */
 struct fsp_file* fsp_files_list_remove(struct fsp_files_list** list, const char* pathname);
 
