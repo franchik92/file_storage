@@ -7,13 +7,16 @@
 #include <sys/time.h>
 #include <pthread.h>
 #include <string.h>
+#include <signal.h>
 #include <errno.h>
 
-#include <fsp_files_bst.h>
+#include <fsp_file.h>
+#include <fsp_files_hash_table.h>
+#include <fsp_files_queue.h>
 #include <fsp_files_list.h>
+#include <fsp_client.h>
 #include <fsp_clients_hash_table.h>
 #include <fsp_sfd_queue.h>
-#include <fsp_files_queue.h>
 #include <fsp_parser.h>
 #include <fsp_reader.h>
 #include <utils.h>
@@ -22,48 +25,124 @@
 #define UNIX_PATH_MAX 104
 #endif
 
+// Nome del file di configurazione
 #define CONFIG_FILE "./config.txt"
+// Dimensione di defualt dei buffer usati dai client (4MB)
 #define FSP_CLIENT_DEF_BUF_SIZE 4194304
+// Dimensioni delle tabelle hash
+#define FSP_FILES_HASH_TABLE_SIZE 49157
+#define FSP_CLIENTS_HASH_TABLE_SIZE 97
 
-typedef struct fsp_file* FILES;
-typedef struct clients_hash_table* CLIENTS;
-typedef struct fsp_sfd_queue* SFD_QUEUE;
-typedef struct fsp_files_queue* PATHNAMES_QUEUE;
+// File
+typedef struct fsp_file* FSP_FILE;
+// Tabella hash contenente tutti i file presenti nel server
+typedef struct fsp_files_hash_table* FILES;
+// Coda usata per l'espulsione dei file dal server
+typedef struct fsp_files_queue* FILES_QUEUE;
+// Lista dei file aperti (una per ogni client)
 typedef struct fsp_files_list* OPENED_FILES;
-typedef struct client_info* CLIENT_INFO;
+// Client
+typedef struct fsp_client* CLIENT;
+// Tabella hash contenente tutti i client connessi al server
+typedef struct fsp_clients_hash_table* CLIENTS;
+// Coda in cui vengono inseriti i sfd per la comunicazione tra il thread master e i thread worker
+typedef struct fsp_sfd_queue* SFD_QUEUE;
 
+// Strutture dati condivise tra i thread
 static FILES files = NULL;
+static FILES_QUEUE files_queue = NULL;
 static CLIENTS clients = NULL;
 static SFD_QUEUE sfd_queue = NULL;
-static PATHNAMES_QUEUE pathnames_queue = NULL;
 
+// Mutex
+// files_mutex viene usato per l'accesso alle strutture dati files e files_queue
+// clients_mutex viene usato per l'accesso alle strutture dati clients e sfd_queue
 static pthread_mutex_t files_mutex;
 static pthread_mutex_t clients_mutex;
-static pthread_mutex_t sfd_queue_mutex;
-static pthread_mutex_t pathnames_queue_mutex;
 
+// Variabili di condizione
 static pthread_cond_t sfd_queue_isNotEmpty;
 static pthread_cond_t lock_cmd_isNotLocked;
 
-// Valori letti dal file di configurazione
-// Numero massimo di file che il server può mantenere in memoria
-static unsigned int files_max_num;
-// Capacità massima di memoria del server in byte
-static unsigned long int storage_max_size;
+// Struttura contenente i valori letti dal file di configurazione
+// Dopo la lettura del file di configurazione, l'accesso a questa struttura avviene in sola lettura
+static struct {
+    // Nome del file socket
+    char socket_file_name[UNIX_PATH_MAX];
+    // Nome del file di log
+    char log_file_name[UNIX_PATH_MAX];
+    // Numero massimo di file che il server può mantenere in memoria
+    unsigned int files_max_num;
+    // Capacità massima di memoria del server in byte
+    unsigned long int storage_max_size;
+    // Numero massimo di connessioni
+    unsigned int max_conn;
+    // Numero dei thread worker
+    unsigned int worker_threads_num;
+} config_file = {"/tmp/file_storage.sk", "./log_file.txt", 1000, 64, 16, 4};
 
-// Numero attuale dei file presenti sul server
-static unsigned int files_num;
-// Dimensione della memoria occupata dai file
-static unsigned long int storage_size;
+// Variabile che indica se il programma deve terminare (quit == 1) o meno (quit == 0)
+static volatile sig_atomic_t quit = 0;
+// Variabile che indica se il server può accettare nuove connessioni (accept_connections == 1) o meno (accept_connections == 0)
+static volatile sig_atomic_t accept_connections = 1;
+
+// Quando i thread worker sono in esecuzione, viene usato files_mutex per l'accesso alle variabili
+// files_num, storage_size, files_max_reached_num, storage_max_reached_size e capacity_misses
+
+// Numero dei file presenti
+static unsigned int files_num = 0;
+// Dimensione della memoria in bytes occupata dai file
+static unsigned long int storage_size = 0;
+
+// Numero di file massimo memorizzato nel server
+static unsigned int files_max_reached_num = 0;
+// Dimensione massima in bytes raggiunta dal file storage
+static unsigned long int storage_max_reached_size = 0;
+// Numero di volte in cui l'algoritmo di rimpiazzamento della cache è stato eseguito per selezionare uno o più file vittima
+static unsigned int capacity_misses = 0;
+
+// Numero dei thread worker attivi (usata con clients_mutex quando i worker thread sono in esecuzione)
+static unsigned int active_workers = 0;
 
 /**
- * \brief Fa il parse del file di configurazione CONFIG_FILE e salva i valori contenuti in esso negli argomenti della funzione.
+ * \brief Libera dalla memoria ogni struttura dati condivisa (files, files_queue, clients, sfd_queue)
+ *        assieme ai suoi elementi e chiude tutte le connessioni attive con i client.
+ */
+static void freeAll(void);
+
+/**
+ * \brief Libera file dalla memoria.
+ */
+static void removeFile(FSP_FILE file);
+
+/**
+ * \brief Stampa il nome del file su stdout e libera file dalla memoria.
+ */
+static void printAndRemoveFile(FSP_FILE file);
+
+/**
+ * \brief Chiude la connessione con il socket file descriptor di client e libera client dalla memoria.
+ */
+static void removeClient(CLIENT client);
+
+/**
+ * \brief Chiude la connessione con il socket file descriptor di client e chiude i file aperti da client.
+ */
+static void closeConnection(CLIENT client);
+
+/**
+ * \brief Gestore dei segnali.
+ */
+static void signalHandler(int signal);
+
+/**
+ * \brief Esegue il parse del file di configurazione CONFIG_FILE_PATH e salva i suoi valori in config_file.
  *
  * \return 0 in caso di successo,
  *         -1 se non è stato possibile aprire il file,
  *         -2 se il file contiene errori sintattici.
  */
-static int parseConfigFile(char* socket_file_name, char* log_file_name, unsigned int* _files_max_num, unsigned long int* _storage_max_size, unsigned int* max_conn, unsigned int* worker_threads_num);
+static int parseConfigFile(void);
 
 /**
  * \brief Funzione eseguita dai thread worker.
@@ -74,14 +153,14 @@ static void* worker(void* arg);
  * \brief Legge da sfd una request fsp e la salva in req.
  *
  * \return 0 in caso di successo,
- *         -1 se client_info == NULL || req == NULL || client_info->buf == NULL ||
- *               client_info->size == NULL || client_info->size > FSP_READER_BUF_MAX_SIZE,
+ *         -1 se client == NULL || req == NULL || client->buf == NULL ||
+ *               client->size == NULL || client->size > FSP_READER_BUF_MAX_SIZE,
  *         -2 in caso di errori durante la lettura (read() setta errno appropriatamente),
  *         -3 se sfd ha raggiunto EOF senza aver letto un messaggio di richiesta,
  *         -4 se il messaggio contiene errori sintattici,
  *         -5 se è stato impossibile riallocare il buffer (memoria insufficiente).
  */
-static int receiveFspReq(CLIENT_INFO client_info, struct fsp_request* req);
+static int receiveFspReq(CLIENT client, struct fsp_request* req);
 
 /**
  * \brief Scrive su sfd un messaggio di risposta fsp con i campi code, description, data_len e data.
@@ -89,54 +168,56 @@ static int receiveFspReq(CLIENT_INFO client_info, struct fsp_request* req);
  * \return 0 in caso di successo,
  *         -1 altrimenti.
  */
-static int sendFspResp(CLIENT_INFO client_info, int code, const char* description, size_t data_len, void* data);
+static int sendFspResp(CLIENT client, int code, const char* description, size_t data_len, void* data);
+
+/**
+ * \brief Rimuove i file dal server in seguito a capacity miss e li salva nel formato fsp del campo data in *data.
+ *        Se data_len != NULL, allora salva in *data_len la lunghezza di *data.
+ *
+ * \return 0 in caso di successo,
+ *         -1 altrimenti.
+ */
+static int capacityMiss(void** data, size_t* data_len);
 
 /* Funzioni che eseguono i comandi richiesti dai client.
- * Prendono in input le informazioni del client (client_info) e il valore dell'argomento del relativo comando fsp (pathname o n).
- * Salvano in *code il codice di risposta e in description (di lunghezza massima descr_max_len) la relativa descrizione.
- * Alcune funzione salvano anche il campo *data (usare free per liberare *data dalla memoria) di lunghezza *data_len.
- * Restituiscono 0 in caso di successo e -1 altrimenti.
- * Se restituiscono -1, allora i valori salvati negli argomenti non sono significativi.
+ * Prendono in input le informazioni del client (client), la request req, la response resp
+ * in cui salvano i campi del messaggio di risposta fsp e la lunghezza massima del campo descrizione in resp descr_max_len.
+ * append_cmd, read_cmd, readn_cmd e write_cmd possono allocare memoria per il campo data in resp (resp->data),
+ * altrimenti resp->data sarà uguale a NULL. Liberare resp->data dalla memoria con free().
+ *
+ * Restituiscono 0 in caso di successo.
+ * Se restituiscono -1 (errore), allora il relativo comando non è stato eseguito e
+ * i valori salvati negli argomenti non sono significativi.
  */
-int append_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_data, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data);
+static int append_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int close_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
+static int close_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int lock_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
+static int lock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int open_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
+static int open_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int openc_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
+static int openc_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int opencl_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
+static int opencl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int openl_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
+static int openl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int read_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data);
+static int read_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int readn_cmd(CLIENT_INFO client_info, long int n, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data);
+static int readn_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int readn_rec(struct fsp_file* root_file, long int* n, long int* wrote_bytes_tot, size_t* data_len, void** data);
+static int remove_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int remove_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
+static int unlock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-int unlock_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len);
-
-int write_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_data, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data);
+static int write_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
 int main(int argc, const char* argv[]) {
-    // Valori letti dal file di configurazione
-    // Nome del file socket
-    char socket_file_name[UNIX_PATH_MAX];
-    // Nome del file di log
-    char log_file_name[UNIX_PATH_MAX];
-    // Numero massimo di connessioni
-    unsigned int max_conn;
-    // Numero dei thread worker
-    unsigned int worker_threads_num;
     
-    // Fa il parse del file di configurazione
-    switch(parseConfigFile(socket_file_name, log_file_name, &files_max_num, &storage_max_size, &max_conn, &worker_threads_num)) {
+    // Esegue il parse del file di configurazione
+    printf("Avvio lettura del file di configurazione %s...\n", CONFIG_FILE);
+    switch(parseConfigFile()) {
         case -1:
             // Impossibile aprire il file di configurazione
             fprintf(stderr, "Errore: impossibile aprire il file di configurazione %s.\n", CONFIG_FILE);
@@ -148,72 +229,126 @@ int main(int argc, const char* argv[]) {
         default:
             break;
     }
+    printf("Lettura del file di configurazione terminata con successo.\n");
     
     // Inizializza le strutture dati
-    if((clients = fsp_clients_hash_table_new(128)) == NULL) {
+    if(config_file.files_max_num)
+    if((files = fsp_files_hash_table_new(FSP_FILES_HASH_TABLE_SIZE)) == NULL ||
+       (files_queue = fsp_files_queue_new()) == NULL ||
+       (clients = fsp_clients_hash_table_new(FSP_CLIENTS_HASH_TABLE_SIZE)) == NULL ||
+       (sfd_queue = fsp_sfd_queue_new(config_file.max_conn)) == NULL) {
         fprintf(stderr, "Errore: memoria insufficiente.\n");
+        freeAll();
         return -1;
     }
-    if((sfd_queue = fsp_sfd_queue_new(max_conn)) == NULL) {
-        fprintf(stderr, "Errore: memoria insufficiente.\n");
-        fsp_clients_hash_table_free(clients);
-        return -1;
-    }
-    if((pathnames_queue = fsp_files_queue_new()) == NULL) {
-        fprintf(stderr, "Errore: memoria insufficiente.\n");
-        fsp_clients_hash_table_free(clients);
-        fsp_sfd_queue_free(sfd_queue);
-        return -1;
-    }
-    
     // Mutex
-    if(pthread_mutex_init(&files_mutex, NULL) != 0) {
-        // Errore
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    if(pthread_mutex_init(&files_mutex, &attr) != 0 ||
+       pthread_mutex_init(&clients_mutex, NULL) != 0) {
+        fprintf(stderr, "Errore: mutex non creato.\n");
+        freeAll();
+        return -1;
     }
-    if(pthread_mutex_init(&clients_mutex, NULL) != 0) {
-        // Errore
-    }
-    if(pthread_mutex_init(&sfd_queue_mutex, NULL) != 0) {
-        // Errore
-    }
-    if(pthread_mutex_init(&pathnames_queue_mutex, NULL) != 0) {
-        // Errore
-    }
-    
     // Condition variables
-    if(pthread_cond_init(&sfd_queue_isNotEmpty, NULL) != 0) {
-        // Errore
+    if(pthread_cond_init(&sfd_queue_isNotEmpty, NULL) != 0 ||
+       pthread_cond_init(&lock_cmd_isNotLocked, NULL) != 0) {
+        fprintf(stderr, "Errore: variabile di condizione non creata.\n");
+        freeAll();
+        return -1;
     }
-    if(pthread_cond_init(&lock_cmd_isNotLocked, NULL) != 0) {
-        // Errore
-    }
-    
     // Pipe senza nome per la comunicazione tra i thread worker e il thread master
     int pfd[2];
     if(pipe(pfd) != 0) {
-        // Errore
+        fprintf(stderr, "Errore: pipe non creata.\n");
+        freeAll();
+        return -1;
     }
+    printf("Strutture dati inizializzate.\n");
+    
+    // Imposta la gestione dei segnali
+    struct sigaction sa;
+    sigset_t mask;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signalHandler;
+    sigfillset(&mask);
+    sa.sa_mask = mask;
+    if(sigaction(SIGINT, &sa, NULL) != 0 ||
+       sigaction(SIGQUIT, &sa, NULL) != 0 ||
+       sigaction(SIGHUP, &sa, NULL) != 0) {
+        perror(NULL);
+        freeAll();
+        close(pfd[0]);
+        close(pfd[1]);
+        return -1;
+    }
+    printf("Gestione dei segnali impostata.\n");
     
     // socket
     int sfd;
     if((sfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
         perror(NULL);
+        freeAll();
+        close(pfd[0]);
+        close(pfd[1]);
         return -1;
     }
+    printf("Socket di tipo SOCK_STREAM creato.\n");
     // bind
     struct sockaddr_un sockaddr;
     sockaddr.sun_family = AF_UNIX;
-    strncpy(sockaddr.sun_path, socket_file_name, UNIX_PATH_MAX);
+    strncpy(sockaddr.sun_path, config_file.socket_file_name, UNIX_PATH_MAX);
     if(bind(sfd, (struct sockaddr*) &sockaddr, sizeof(sockaddr)) == -1) {
         perror(NULL);
+        freeAll();
+        close(sfd);
+        close(pfd[0]);
+        close(pfd[1]);
         return -1;
     }
+    printf("Nome %s assegnato al socket.\n", config_file.socket_file_name);
     // listen
     if(listen(sfd, SOMAXCONN) == -1) {
         perror(NULL);
+        freeAll();
+        close(sfd);
+        close(pfd[0]);
+        close(pfd[1]);
         return -1;
     }
+    printf("Socket in ascolto.\n");
+    
+    // Crea i thread
+    active_workers = config_file.worker_threads_num;
+    pthread_t* threads = NULL;
+    if((threads = malloc(sizeof(pthread_t)*config_file.worker_threads_num)) == NULL) {
+        fprintf(stderr, "Errore: memoria insufficiente.\n");
+        freeAll();
+        close(sfd);
+        close(pfd[0]);
+        close(pfd[1]);
+        return -1;
+    }
+    for(int i = 0; i < config_file.worker_threads_num; i++) {
+        if(pthread_create(&(threads[i]), NULL, worker, (void*) &(pfd[1])) != 0) {
+            for(int j = 0; j <= i; j++) {
+                pthread_detach(threads[j]);
+            }
+            freeAll();
+            close(sfd);
+            close(pfd[0]);
+            close(pfd[1]);
+            free(threads);
+        }
+    }
+    printf("Avvio dell'esecuzione dei thread worker.\n");
+    
     // select
+    int ready_descriptors_num;
+    struct timeval timeout;
+    memset(&timeout, 0, sizeof(timeout));
+    timeout.tv_sec = 5;
     fd_set set, rdset;
     FD_ZERO(&set);
     FD_SET(sfd, &set);
@@ -221,57 +356,119 @@ int main(int argc, const char* argv[]) {
     int fd_max = 0;
     if(pfd[0] > fd_max) fd_max = pfd[0];
     if(sfd > fd_max) fd_max = sfd;
-    while(1) {
+    int break_loop = 0;
+    while(break_loop) {
         rdset = set;
-       if(select(fd_max+1, &rdset, NULL, NULL, NULL) == -1) {
-            perror(NULL);
+        if((ready_descriptors_num = select(fd_max+1, &rdset, NULL, NULL, &timeout)) == -1) {
+            // Termina l'esecuzione
+            for(int i = 0; i < config_file.worker_threads_num; i++) {
+                pthread_detach(threads[i]);
+            }
+            freeAll();
+            close(sfd);
+            close(pfd[0]);
+            close(pfd[1]);
+            free(threads);
             return -1;
         } else {
+            if(ready_descriptors_num == 0) {
+                // Timeout
+                memset(&timeout, 0, sizeof(timeout));
+                pthread_mutex_lock(&clients_mutex);
+                if(quit || (!accept_connections && clients->clients_num == 0)) {
+                    pthread_cond_signal(&sfd_queue_isNotEmpty);
+                } else {
+                    timeout.tv_sec = 5;
+                }
+                pthread_mutex_unlock(&clients_mutex);
+                continue;
+            }
             for(int fd = 0; fd < fd_max; fd++) {
                 if(FD_ISSET(fd, &rdset)) {
                     if(fd == sfd) {
+                        if(quit || !accept_connections) {
+                            // Il server non accetta più nuove connessioni
+                            FD_CLR(fd, &set);
+                            if(fd == fd_max) {
+                                // Determina il nuovo fd_max
+                                int _fd = fd;
+                                // È sempre presente almeno il file descriptor della pipe
+                                while(!FD_ISSET(_fd, &set)) _fd--;
+                                fd_max = _fd;
+                            }
+                            continue;
+                        }
+                        
                         // Accetta una nuova connessione
                         int fd_c;
                         if((fd_c = accept(sfd, NULL, 0)) != -1) {
                             perror(NULL);
                             continue;
                         }
+                        printf("Connessione aperta con %d.\n", fd_c);
                         
-                        pthread_mutex_lock(&sfd_queue_mutex);
-                        fsp_clients_hash_table_insert(clients, fd_c, FSP_CLIENT_DEF_BUF_SIZE);
-                        CLIENT_INFO client_info = fsp_clients_hash_table_search(clients, fd_c);
-                        pthread_mutex_unlock(&sfd_queue_mutex);
+                        // Crea un nuovo client
+                        CLIENT client = NULL;
+                        if((client = fsp_client_new(fd_c, FSP_CLIENT_DEF_BUF_SIZE)) == NULL) {
+                            fprintf(stderr, "Errore: memoria insufficiente per aggiungere un nuovo client.\n");
+                            close(fd_c);
+                            printf("Connessione chiusa con %d (memoria insufficiente).\n", fd_c);
+                            continue;
+                        }
                         
-                        // Invia il messaggio di risposta fsp con codice 220
-                        sendFspResp(client_info, 220, "Service ready.", 0, NULL);
-                        FD_SET(fd_c, &set);
-                        if(fd_c > fd_max) fd_max = fd_c;
+                        int serviceNotAvailable = 0;
+                        pthread_mutex_lock(&clients_mutex);
+                        if(clients->clients_num == config_file.max_conn) {
+                            serviceNotAvailable = 1;
+                        } else {
+                            // Aggiunge il client alla tabella hash
+                            fsp_clients_hash_table_insert(clients, client);
+                        }
+                        pthread_mutex_unlock(&clients_mutex);
+                        
+                        if(serviceNotAvailable) {
+                            // Invia il messaggio di risposta fsp con codice 421
+                            sendFspResp(client, 421, "Service not available, closing connection.", 0, NULL);
+                            close(fd_c);
+                            printf("Connessione chiusa con %d (servizio non disponibile).\n", fd_c);
+                        } else {
+                            // Invia il messaggio di risposta fsp con codice 220
+                            if(sendFspResp(client, 220, "Service ready.", 0, NULL) != 0) {
+                                fprintf(stderr, "Errore: messaggio di risposta non inviato al client %d.\n", fd_c);
+                                close(fd_c);
+                                printf("Connessione chiusa con %d (impossibile inviare messaggio di risposta).\n", fd_c);
+                                continue;
+                            }
+                            
+                            FD_SET(fd_c, &set);
+                            if(fd_c > fd_max) fd_max = fd_c;
+                        }
                     } else if(fd == pfd[0]) {
-                        // Descrittore da riaggiungere (comunicato dal thead worker)
+                        // Descrittore da aggiungere nuovamente (comunicato da un thread worker)
                         int fd_c;
                         if(read(pfd[0], &fd_c, sizeof(int)) == 0) {
-                            // Il descrittore di scrittura è stato chiuso
-                            FD_CLR(pfd[0], &set);
-                            if(pfd[0] == fd_max) {
-                                int _fd = pfd[0];
-                                // È sempre presente almeno il descrittore per accettare nuove connessioni
-                                while(!FD_ISSET(_fd, &set)) _fd--;
-                                fd_max = _fd;
-                            }
+                            // Il descrittore della pipe per la scrittura è stato chiuso
+                            // Termina l'esecuzione
+                            close(pfd[0]);
+                            close(sfd);
+                            break_loop = 1;
+                            break;
                         } else {
                             FD_SET(fd_c, &set);
                             if(fd_c > fd_max) fd_max = fd_c;
                         }
                     } else {
                         // lettura request fsp
-                        pthread_mutex_lock(&sfd_queue_mutex);
+                        pthread_mutex_lock(&clients_mutex);
                         fsp_sfd_queue_enqueue(sfd_queue, fd);
                         pthread_cond_signal(&sfd_queue_isNotEmpty);
-                        pthread_mutex_unlock(&sfd_queue_mutex);
+                        pthread_mutex_unlock(&clients_mutex);
+                        
                         FD_CLR(fd, &set);
                         if(fd == fd_max) {
+                            // Determina il nuovo fd_max
                             int _fd = fd;
-                            // È sempre presente almeno il descrittore per accettare nuove connessioni
+                            // È sempre presente almeno il file descriptor della pipe
                             while(!FD_ISSET(_fd, &set)) _fd--;
                             fd_max = _fd;
                         }
@@ -281,43 +478,128 @@ int main(int argc, const char* argv[]) {
         }
     }
     
+    // Join sui thread worker
+    for(int i = 0; i < config_file.worker_threads_num; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    free(threads);
+    printf("Esecuzione dei thread worker terminata.\n");
     
+    // Stampa il sunto delle operazioni
+    printf("--------------------------------\n");
+    printf("Numero di file massimo memorizzato nel server: %d\n", files_max_reached_num);
+    printf("Dimensione massima raggiunta dal file storage: %.2f MB\n", (float) storage_max_reached_size/1048576.0);
+    printf("Numero di volte in cui la cache è stata rimpiazzata: %d\n", capacity_misses);
+    printf("File contenuti nello storage al momento della chiusura del server:\n");
+    fsp_files_hash_table_deleteAll(files, printAndRemoveFile);
+    fsp_files_hash_table_free(files);
+    files = NULL;
+    
+    freeAll();
     
     return 0;
 }
 
-static int parseConfigFile(char* socket_file_name, char* log_file_name, unsigned int* _files_max_num, unsigned long int* _storage_max_size, unsigned int* max_conn, unsigned int* worker_threads_num) {
+static void freeAll() {
+    if(files_queue != NULL) fsp_files_queue_free(files_queue);
+    if(files != NULL) {
+        fsp_files_hash_table_deleteAll(files, removeFile);
+        fsp_files_hash_table_free(files);
+    }
+    if(clients != NULL) {
+        fsp_clients_hash_table_deleteAll(clients, removeClient);
+        fsp_clients_hash_table_free(clients);
+    }
+    if(sfd_queue != NULL) fsp_sfd_queue_free(sfd_queue);
+}
+
+static void removeFile(FSP_FILE file) {
+    if(file != NULL) {
+        fsp_file_free(file);
+    }
+}
+
+static void printAndRemoveFile(FSP_FILE file) {
+    if(file != NULL) {
+        printf("%s\n", file->pathname);
+        fsp_file_free(file);
+    }
+}
+
+static void removeClient(CLIENT client) {
+    if(client != NULL) {
+        close(client->sfd);
+        fsp_client_free(client);
+    }
+}
+
+static void closeConnection(CLIENT client) {
+    if(client == NULL) return;
+    
+    pthread_mutex_lock(&clients_mutex);
+    fsp_clients_hash_table_delete(clients, client->sfd);
+    close(client->sfd);
+    pthread_mutex_unlock(&clients_mutex);
+    
+    // Chiude i file aperti dal client
+    pthread_mutex_lock(&files_mutex);
+    while(client->openedFiles != NULL) {
+        FSP_FILE opened_file = (client->openedFiles)->file;
+        fsp_files_list_remove(&(client->openedFiles), opened_file->pathname);
+        if(opened_file->locked == client->sfd) {
+            opened_file->locked = -1;
+            pthread_cond_broadcast(&lock_cmd_isNotLocked);
+        }
+        opened_file->links--;
+        if(opened_file->links == 0) {
+            if(opened_file->data == NULL) {
+                fsp_files_queue_remove(files_queue, opened_file->pathname);
+                files_num--;
+            }
+            if(opened_file->remove || opened_file->data == NULL) {
+                fsp_files_hash_table_delete(files, opened_file->pathname);
+                fsp_file_free(opened_file);
+            }
+        }
+    }
+    pthread_mutex_unlock(&files_mutex);
+    
+    fsp_client_free(client);
+}
+
+static void signalHandler(int signal) {
+    if(signal == SIGINT || signal == SIGQUIT) {
+        quit = 1;
+    } else if(signal == SIGHUP) {
+        accept_connections = 0;
+    }
+}
+
+static int parseConfigFile() {
     FILE* file = NULL;
     if((file = fopen(CONFIG_FILE, "r")) == NULL) {
+        // File non aperto
         return -1;
     }
     
-    int lines = 6;
     const size_t buf_size = 256;
     char buf[buf_size];
+    long int val;
     
-    for(int line = 0; line < lines; line++) {
-        if(fgets(buf, buf_size, file) == NULL) {
-            fclose(file);
-            return -2;
-        }
-        
+    while(fgets(buf, buf_size, file) != NULL) {
         char* param_start = buf;
         char* end = param_start;
-        while(*end != '\0' || *end != ':') end++;
+        while(*end != '\0' || *end != '=') end++;
         if(*end == '\0') {
             // Errore di sintassi
             fclose(file);
             return -2;
         }
         *end = '\0';
-        
-        end++;
-        if(*end != ' ') return -2;
         end++;
         
         char* val_start = end;
-
+        
         while(*end != '\0' || *end != '\n') end++;
         if(*end == '\0') {
             // Errore di sintassi
@@ -326,273 +608,161 @@ static int parseConfigFile(char* socket_file_name, char* log_file_name, unsigned
         }
         *end = '\0';
         
-        long int val;
-        switch(line) {
-            case 0:
-                // SOCKET_FILE_NAME
-                if(strcmp("SOCKET_FILE_NAME", param_start) != 0) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                strncpy(socket_file_name, val_start, UNIX_PATH_MAX);
-                break;
-            case 1:
-                // LOG_FILE_NAME
-                if(strcmp("LOG_FILE_NAME", param_start) != 0) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                strncpy(log_file_name, val_start, UNIX_PATH_MAX);
-                break;
-            case 2:
-                // FILES_MAX_NUM
-                if(strcmp("FILES_MAX_NUM", param_start) != 0) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                if(!isNumber(val_start, &val)) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                *_files_max_num = (unsigned int) val;
-                break;
-            case 3:
-                // STORAGE_MAX_SIZE
-                if(strcmp("STORAGE_MAX_SIZE", param_start) != 0) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                if(!isNumber(val_start, &val)) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                *_storage_max_size = (unsigned long int) val;
-                break;
-            case 4:
-                // MAX_CONN
-                if(strcmp("MAX_CONN", param_start) != 0) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                if(!isNumber(val_start, &val)) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                *max_conn = (unsigned int) val;
-                break;
-            case 5:
-                // WORKER_THREADS_NUM
-                if(strcmp("WORKER_THREADS_NUM", param_start) != 0) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                if(!isNumber(val_start, &val)) {
-                    // Errore di sintassi
-                    fclose(file);
-                    return -2;
-                }
-                *worker_threads_num = (unsigned int) val;
-                break;
-            default:
-                break;
+        if(strcmp("SOCKET_FILE_NAME", param_start) == 0) {
+            strncpy(config_file.socket_file_name, val_start, UNIX_PATH_MAX);
+        } else if(strcmp("LOG_FILE_NAME", param_start) == 0) {
+            strncpy(config_file.log_file_name, val_start, UNIX_PATH_MAX);
+        } else if(strcmp("FILES_MAX_NUM", param_start) == 0) {
+            if(!isNumber(val_start, &val) || val < 0) {
+                // Errore di sintassi
+                fclose(file);
+                return -2;
+            }
+            config_file.files_max_num = (unsigned int) val;
+        } else if(strcmp("STORAGE_MAX_SIZE", param_start) == 0) {
+            if(!isNumber(val_start, &val) || val < 0) {
+                // Errore di sintassi
+                fclose(file);
+                return -2;
+            }
+            config_file.storage_max_size = (unsigned long int) val;
+        } else if(strcmp("MAX_CONN", param_start) == 0) {
+            if(!isNumber(val_start, &val) || val < 0) {
+                // Errore di sintassi
+                fclose(file);
+                return -2;
+            }
+            config_file.max_conn = (unsigned int) val;
+        } else if(strcmp("WORKER_THREADS_NUM", param_start) == 0) {
+            if(!isNumber(val_start, &val) || val < 0) {
+                // Errore di sintassi
+                fclose(file);
+                return -2;
+            }
+            config_file.worker_threads_num = (unsigned int) val;
+        } else {
+            // Parametro non riconosciuto
+            fclose(file);
+            return -2;
         }
     }
-    fclose(file);
     
+    fclose(file);
     return 0;
 }
 
 static void* worker(void* arg) {
+    // Descrittore della pipe per la scrittura
+    // (necessario per comunicare con il master thread)
     int pfd = *((int*) arg);
     
     while(1) {
-        int sfd;
-        CLIENT_INFO client_info = NULL;
         
-        pthread_mutex_lock(&sfd_queue_mutex);
-        while(fsp_sfd_queue_isEmpty(sfd_queue)) {
-            pthread_cond_wait(&sfd_queue_isNotEmpty, &sfd_queue_mutex);
+        int sfd;
+        CLIENT client = NULL;
+        
+        // Determina il client
+        pthread_mutex_lock(&clients_mutex);
+        while(fsp_sfd_queue_isEmpty(sfd_queue) && !quit && (accept_connections || clients->clients_num != 0)) {
+            pthread_cond_wait(&sfd_queue_isNotEmpty, &clients_mutex);
+        }
+        if(quit || (!accept_connections && clients->clients_num == 0)) {
+            if(active_workers == 1) close(pfd);
+            active_workers--;
+            pthread_cond_signal(&sfd_queue_isNotEmpty);
+            pthread_mutex_unlock(&clients_mutex);
+            return 0;
         }
         sfd = fsp_sfd_queue_dequeue(sfd_queue);
-        pthread_mutex_unlock(&sfd_queue_mutex);
-        
-        pthread_mutex_lock(&clients_mutex);
-        client_info = fsp_clients_hash_table_search(clients, sfd);
+        client = fsp_clients_hash_table_search(clients, sfd);
         pthread_mutex_unlock(&clients_mutex);
         
-        if(client_info == NULL) {
+        if(client == NULL) {
             fprintf(stderr, "Errore: client con socket file descriptor %d non trovato.\n", sfd);
+            close(sfd);
             continue;
         }
         
-        int code = 200;
+        // Il messaggio di risposta
         const size_t descr_max_len = 128;
         char description[descr_max_len];
-        size_t data_len = 0;
-        void* data = NULL;
+        struct fsp_response resp = {200, description, 0, NULL};
         
         // Legge il messaggio di richiesta
         struct fsp_request req;
-        switch(receiveFspReq(client_info, &req)) {
+        switch(receiveFspReq(client, &req)) {
             case -1:
-                // client_info->buf == NULL || client_info->size == NULL
-                // client_info->size > FSP_READER_BUF_MAX_SIZE
+                // client->buf == NULL || client->size == NULL
+                // client->size > FSP_READER_BUF_MAX_SIZE
             case -2:
                 // Errori durante la lettura
             case -3:
                 // sfd ha raggiunto EOF senza aver letto un messaggio di richiesta
                 
                 // Chiude immediatamente la connessione
-                close(client_info->sfd);
-                pthread_mutex_lock(&clients_mutex);
-                fsp_clients_hash_table_delete(clients, client_info->sfd);
-                pthread_mutex_unlock(&clients_mutex);
+                closeConnection(client);
                 continue;
             case -4:
                 // Il messaggio di richiesta contiene errori sintattici
-                code = 501;
-                strncpy(description, "Syntax error, message unrecognised.", descr_max_len);
+                resp.code = 501;
+                strncpy(resp.description, "Syntax error, message unrecognised.", descr_max_len);
                 description[descr_max_len-1] = '\0';
                 break;
             case -5:
                 // Impossibile riallocare il buffer (memoria insufficiente)
-                code = 421;
-                strncpy(description, "Service not available, closing connection.", descr_max_len);
+                resp.code = 421;
+                strncpy(resp.description, "Service not available, closing connection.", descr_max_len);
                 description[descr_max_len-1] = '\0';
                 break;
             default:
                 break;
         }
         
-        if(code != 421 && code != 501) {
-            // Esegue il comando
-            // Valore di ritorno
+        // Esegue il comando
+        if(resp.code != 421 && resp.code != 501) {
+            // Valore di ritorno delle funzioni che eseguono i comandi
             int ret_val = 0;
-            // Dati contenuti nel campo data
-            struct fsp_data parsed_data;
-            // Valore dell'argomento del comando READN
-            long int n;
             switch(req.cmd) {
                 case APPEND:
-                    // Legge i dati
-                    switch (fsp_parser_parseData(req.data_len, req.data, &parsed_data)) {
-                        case -1:
-                            // data_len <= 0 || data == NULL || parsed_data == NULL
-                        case -2:
-                            // Il campo data del messaggio è incompleto
-                        case -3:
-                            // Il campo data del messaggio contiene errori sintattici
-                            code = 501;
-                            strncpy(description, "Syntax error, message unrecognised.", descr_max_len);
-                            description[descr_max_len-1] = '\0';
-                            break;
-                        case -4:
-                            // Impossibile allocare memoria nello heap
-                            // Chiude immediatamente la connessione
-                            close(client_info->sfd);
-                            pthread_mutex_lock(&clients_mutex);
-                            fsp_clients_hash_table_delete(clients, client_info->sfd);
-                            pthread_mutex_unlock(&clients_mutex);
-                            continue;
-                        default:
-                            // Successo
-                            break;
-                    }
-                    if(parsed_data.n != 1) {
-                        fsp_parser_freeData(&parsed_data);
-                        code = 501;
-                        strncpy(description, "Syntax error, message unrecognised.", descr_max_len);
-                        description[descr_max_len-1] = '\0';
-                        break;
-                    }
-                    ret_val = append_cmd(client_info, req.arg, &parsed_data, &code, description, descr_max_len, &data_len, &data);
-                    fsp_parser_freeData(&parsed_data);
+                    ret_val = append_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case CLOSE:
-                    ret_val = close_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = close_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case LOCK:
-                    ret_val = lock_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = lock_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case OPEN:
-                    ret_val = open_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = open_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case OPENC:
-                    ret_val = openc_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = openc_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case OPENCL:
-                    ret_val = opencl_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = opencl_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case OPENL:
-                    ret_val = openl_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = openl_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case QUIT:
-                    code = 221;
-                    strncpy(description, "Service closing connection.", descr_max_len);
-                    description[descr_max_len-1] = '\0';
+                    resp.code = 221;
+                    strncpy(resp.description, "Service closing connection.", descr_max_len);
+                    resp.description[descr_max_len-1] = '\0';
                     break;
                 case READ:
-                    if(isNumber(req.arg, &n)) {
-                        ret_val = read_cmd(client_info, req.arg, &code, description, descr_max_len, &data_len, &data);
-                    } else {
-                        code = 501;
-                        strncpy(description, "Syntax error, message unrecognised.", descr_max_len);
-                        description[descr_max_len-1] = '\0';
-                        break;
-                    }
+                    ret_val = read_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case READN:
-                    ret_val = readn_cmd(client_info, n, &code, description, descr_max_len, &data_len, &data);
+                    ret_val = readn_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case REMOVE:
-                    ret_val = remove_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = remove_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case UNLOCK:
-                    ret_val = unlock_cmd(client_info, req.arg, &code, description, descr_max_len);
+                    ret_val = unlock_cmd(client, &req, &resp, descr_max_len);
                     break;
                 case WRITE:
-                    // Legge i dati
-                    switch (fsp_parser_parseData(req.data_len, req.data, &parsed_data)) {
-                        case -1:
-                            // data_len <= 0 || data == NULL || parsed_data == NULL
-                        case -2:
-                            // Il campo data del messaggio è incompleto
-                        case -3:
-                            // Il campo data del messaggio contiene errori sintattici
-                            code = 501;
-                            strncpy(description, "Syntax error, message unrecognised.", descr_max_len);
-                            description[descr_max_len-1] = '\0';
-                            break;
-                        case -4:
-                            // Impossibile allocare memoria nello heap
-                            // Chiude immediatamente la connessione
-                            close(client_info->sfd);
-                            pthread_mutex_lock(&clients_mutex);
-                            fsp_clients_hash_table_delete(clients, client_info->sfd);
-                            pthread_mutex_unlock(&clients_mutex);
-                            continue;
-                        default:
-                            // Successo
-                            break;
-                    }
-                    if(parsed_data.n != 1) {
-                        fsp_parser_freeData(&parsed_data);
-                        code = 501;
-                        strncpy(description, "Syntax error, message unrecognised.", descr_max_len);
-                        description[descr_max_len-1] = '\0';
-                        break;
-                    }
-                    ret_val = write_cmd(client_info, req.arg, &parsed_data, &code, description, descr_max_len, &data_len, &data);
-                    fsp_parser_freeData(&parsed_data);
+                    ret_val = write_cmd(client, &req, &resp, descr_max_len);
                     break;
                 default:
                     // Mai eseguito
@@ -600,46 +770,42 @@ static void* worker(void* arg) {
             }
             if(ret_val != 0) {
                 // Chiude immediatamente la connessione
-                close(client_info->sfd);
-                fsp_clients_hash_table_delete(clients, client_info->sfd);
+                closeConnection(client);
                 continue;
             }
         }
         
         // Invia il messaggio di risposta
-        if(sendFspResp(client_info, code, description, data_len, data) != 0) {
+        if(sendFspResp(client, resp.code, resp.description, resp.data_len, resp.data) != 0) {
             // Chiude immediatamente la connessione
-            if(data != NULL) free(data);
-            close(client_info->sfd);
-            fsp_clients_hash_table_delete(clients, client_info->sfd);
+            if(resp.data != NULL) free(resp.data);
+            closeConnection(client);
             continue;
         }
         // Libera il campo data dalla memoria se necessario
-        if(data != NULL) {
-            free(data);
+        if(resp.data != NULL) {
+            free(resp.data);
         }
         
-        if(code == 221) {
+        if(resp.code == 221 || quit) {
             // Chiude la connessione
-            if(data != NULL) free(data);
-            close(client_info->sfd);
-            fsp_clients_hash_table_delete(clients, client_info->sfd);
+            closeConnection(client);
             continue;
         }
         
         // Comunica al master thread il valore sfd (attraverso una pipe senza nome)
-        write(pfd, &(client_info->sfd), sizeof(int));
+        write(pfd, &(client->sfd), sizeof(int));
     }
     
     return 0;
 }
 
-static int receiveFspReq(CLIENT_INFO client_info, struct fsp_request* req) {
-    if(client_info == NULL || req == NULL) return -1;
+static int receiveFspReq(CLIENT client, struct fsp_request* req) {
+    if(client == NULL || req == NULL) return -1;
     
     int ret_val;
     struct fsp_request _req;
-    if ((ret_val = fsp_reader_readRequest(client_info->sfd, &(client_info->buf), &(client_info->size), &_req)) != 0) {
+    if ((ret_val = fsp_reader_readRequest(client->sfd, &(client->buf), &(client->size), &_req)) != 0) {
         return ret_val;
     }
     
@@ -648,17 +814,17 @@ static int receiveFspReq(CLIENT_INFO client_info, struct fsp_request* req) {
     return 0;
 }
 
-static int sendFspResp(CLIENT_INFO client_info, int code, const char* description, size_t data_len, void* data) {
-    if(client_info == NULL) return -1;
+static int sendFspResp(CLIENT client, int code, const char* description, size_t data_len, void* data) {
+    if(client == NULL) return -1;
     
     // Genera il messaggio di risposta
     long int bytes;
-    switch(bytes = fsp_parser_makeResponse(&(client_info->buf), &(client_info->size), code, description, data_len, data)) {
+    switch(bytes = fsp_parser_makeResponse(&(client->buf), &(client->size), code, description, data_len, data)) {
         case -1:
             // buf == NULL || *buf == NULL || size == NULL || data_len < 0 ||
-            // (data_len > 0 && data == NULL) || client_info->size > FSP_PARSER_BUF_MAX_SIZE
+            // (data_len > 0 && data == NULL) || client->size > FSP_PARSER_BUF_MAX_SIZE
         case -2:
-            // Non è stato possibile riallocare la memoria per client_info->buf
+            // Non è stato possibile riallocare la memoria per client->buf
             return -1;
         default:
             // Successo
@@ -666,10 +832,10 @@ static int sendFspResp(CLIENT_INFO client_info, int code, const char* descriptio
     }
     
     // Invia il messaggio di risposta
-    char* _buf = (char*) client_info->buf;
+    char* _buf = (char*) client->buf;
     ssize_t w_bytes;
     while(bytes > 0) {
-        if((w_bytes = write(client_info->sfd, _buf, bytes)) == -1) {
+        if((w_bytes = write(client->sfd, _buf, bytes)) == -1) {
             // Errore durante la scrittura
             return -1;
         } else {
@@ -681,77 +847,173 @@ static int sendFspResp(CLIENT_INFO client_info, int code, const char* descriptio
     return 0;
 }
 
-int append_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_data, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL || data_len == NULL || data == NULL) return -1;
+static int capacityMiss(void** data, size_t* data_len) {
+    pthread_mutex_lock(&files_mutex);
     
-    struct fsp_file* file;
+    if(files_num <= config_file.files_max_num && storage_size <= config_file.storage_max_size) {
+        pthread_mutex_unlock(&files_mutex);
+        return 0;
+    }
+    
+    unsigned long int prev_storage_size = storage_size;
+    int n = 0;
+    size_t tot_size = 0;
+    
+    FSP_FILE file = files_queue->head;
+    
+    // Determina il numero di file da espellere e stima tot_size
+    while(files_num > config_file.files_max_num || storage_size > config_file.storage_max_size) {
+        if(file == NULL) {
+            files_num += n;
+            storage_size = prev_storage_size;
+            pthread_mutex_unlock(&files_mutex);
+            return -1;
+        }
+        files_num--;
+        storage_size -= file->size;
+        n++;
+        tot_size += file->size + strlen(file->pathname) + 32;
+        file = file->queue_next;
+    }
+    
+    // Alloca la memoria per *data
+    if((*data = malloc(tot_size)) == NULL) {
+        files_num += n;
+        storage_size = prev_storage_size;
+        pthread_mutex_unlock(&files_mutex);
+        return -1;
+    }
+    
+    // Scrive in *data
+    long int wrote_bytes_tot = 0;
+    long int wrote_bytes = 0;
+    file = files_queue->head;
+    wrote_bytes = fsp_parser_makeData(*data, &tot_size, 0, n, file->pathname, file->size, file->data);
+    if(wrote_bytes < 0) {
+        files_num += n;
+        storage_size = prev_storage_size;
+        free(*data);
+        *data = NULL;
+        pthread_mutex_unlock(&files_mutex);
+        return -1;
+    }
+    wrote_bytes_tot += wrote_bytes;
+    for(int i = 1; i < n; i++) {
+        file = file->queue_next;
+        wrote_bytes = fsp_parser_makeData(data, &tot_size, wrote_bytes, 0, file->pathname, file->size, file->data);
+        if(wrote_bytes < 0) {
+            files_num += n;
+            storage_size = prev_storage_size;
+            free(*data);
+            *data = NULL;
+            pthread_mutex_unlock(&files_mutex);
+            return -1;
+        }
+        wrote_bytes_tot += wrote_bytes;
+    }
+    *data_len = wrote_bytes;
+    
+    // Rimuove i file
+    for(int i = 0; i < n; i++) {
+        file = fsp_files_queue_dequeue(files_queue);
+        if(file->links == 0) {
+            // Rimuove il file
+            fsp_files_hash_table_delete(files, file->pathname);
+            fsp_file_free(file);
+        } else {
+            // File da rimuovere quando verrà chiuso da tutti i client
+            file->remove = 1;
+            pthread_cond_broadcast(&lock_cmd_isNotLocked);
+        }
+    }
+    
+    // Aggiorna la statistica
+    capacity_misses++;
+    pthread_mutex_unlock(&files_mutex);
+    return 0;
+}
+
+int append_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
+    
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    // Dati contenuti nel campo data
+    struct fsp_data parsed_data;
+    
+    // Legge i dati
+    switch (fsp_parser_parseData(req->data_len, req->data, &parsed_data)) {
+        case -1:
+            // data_len <= 0 || data == NULL || parsed_data == NULL
+        case -2:
+            // Il campo data del messaggio è incompleto
+        case -3:
+            // Il campo data del messaggio contiene errori sintattici
+            resp->code = 501;
+            strncpy(resp->description, "Syntax error, message unrecognised.", descr_max_len);
+            resp->description[descr_max_len-1] = '\0';
+            return 0;
+        case -4:
+            // Impossibile allocare memoria nello heap
+            return -1;
+        default:
+            // Successo
+            break;
+    }
+    if(parsed_data.n != 1) {
+        fsp_parser_freeData(&parsed_data);
+        resp->code = 501;
+        strncpy(resp->description, "Syntax error, message unrecognised.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    FSP_FILE file;
     int notOpened = 0;
-    int removed = 0;
     int notLocked = 0;
+    int noMemory = 0;
     
     pthread_mutex_lock(&files_mutex);
     // Cerca il file
-    file = fsp_files_bst_search(files, pathname);
+    file = fsp_files_hash_table_search(files, req->arg);
+    // Se il file esiste ma deve essere rimosso, allora non esegue il comando
+    if(file != NULL && file->remove) file = NULL;
     if(file != NULL) {
-        if(!file->remove) {
-            if(fsp_files_list_contains(client_info->openedFiles, pathname)) {
-                // Il file è stato aperto dal client
-                if(file->locked >= 0 && file->locked == client_info->sfd) {
-                    // Si può scrivere sul file
-                    size_t file_size_tot = file->size + parsed_data->sizes[0];
-                    
-                    struct fsp_file* file_tmp = file->data;
-                    if((file_tmp = realloc(file->data, file_size_tot)) == NULL) {
+        if(file->size + parsed_data.sizes[0] <= config_file.storage_max_size) {
+            if(fsp_files_list_contains(client->openedFiles, req->arg) && file->data != NULL) {
+                // Il file è stato aperto dal client senza flag O_CREATE
+                if(file->locked >= 0 && file->locked == client->sfd) {
+                    // Il client detiene la lock sul file
+                    void* _data = file->data;
+                    if((file->data = realloc(file->data, file->size + parsed_data.sizes[0])) == NULL) {
+                        file->data = _data;
+                        fsp_parser_freeData(&parsed_data);
                         pthread_mutex_unlock(&files_mutex);
                         return -1;
                     }
-                    file->data = file_tmp;
-                    memcpy((file->data)+file->size, parsed_data->data[0], parsed_data->sizes[0]);
-                    file->size = file_size_tot;
-                    storage_size += parsed_data->sizes[0];
+                    memcpy((file->data) + file->size, parsed_data.data[0], parsed_data.sizes[0]);
+                    file->size += parsed_data.sizes[0];
+                    unsigned long int prev_storage_size = storage_size;
+                    storage_size += parsed_data.sizes[0];
                     
                     // Espelle i file dalla memoria se necessario
-                    if(storage_size > storage_max_size) {
-                        int n = 0;
-                        size_t _tot_size = 0;
-                        struct fsp_file* _file;
-                        struct fsp_file_pathname* _file_pathname = pathnames_queue->head;
-                        while(storage_size > storage_max_size) {
-                            _file = fsp_files_bst_search(files, _file_pathname->pathname);
-                            _file->remove = 1;
-                            storage_size -= _file->size;
-                            n++;
-                            _tot_size += _file->size + strlen(_file->pathname) + 32;
-                            _file_pathname = _file_pathname->next;
-                        }
-                        
-                        if((*data = malloc(_tot_size)) == NULL) {
-                            pthread_mutex_unlock(&files_mutex);
-                            return -1;
-                        }
-                        
-                        long int wrote_bytes_tot = 0;
-                        long int wrote_bytes = 0;
-                        _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
-                        _file = fsp_files_bst_search(files, _file_pathname->pathname);
-                        wrote_bytes = fsp_parser_makeData(data, &_tot_size, 0, n, pathname, _file->size, _file->data);
-                        if(wrote_bytes < 0) {
-                            pthread_mutex_unlock(&files_mutex);
-                            return -1;
-                        }
-                        wrote_bytes_tot += wrote_bytes;
-                        for(int i = 0; i < n-1; i++) {
-                            _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
-                            _file = fsp_files_bst_search(files, _file_pathname->pathname);
-                            wrote_bytes = fsp_parser_makeData(data, &_tot_size, wrote_bytes, n, pathname, _file->size, _file->data);
-                            if(wrote_bytes < 0) {
-                                pthread_mutex_unlock(&files_mutex);
-                                return -1;
+                    if(storage_size > config_file.storage_max_size) {
+                        if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
+                            _data = file->data;
+                            if((file->data = realloc(file->data, file->size - parsed_data.sizes[0])) == NULL) {
+                                file->data = _data;
                             }
-                            wrote_bytes_tot += wrote_bytes;
+                            file->size -= parsed_data.sizes[0];
+                            fsp_parser_freeData(&parsed_data);
+                            storage_size = prev_storage_size;
+                            pthread_mutex_unlock(&files_mutex);
+                            return -1;
                         }
-                        *data_len = wrote_bytes;
                     }
+                    
+                    // Aggiorna la statistica
+                    if(storage_size > storage_max_reached_size) storage_max_reached_size = storage_size;
                 } else  {
                     notLocked = 1;
                 }
@@ -759,57 +1021,80 @@ int append_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_
                 notOpened = 1;
             }
         } else {
-            removed = 1;
+            noMemory = 1;
         }
     }
     pthread_mutex_unlock(&files_mutex);
     
-    if(file == NULL || notOpened || removed) {
-        // File inesistente o non aperto dal client
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+    fsp_parser_freeData(&parsed_data);
+    
+    if(file == NULL) {
+        // File inesistente o file da rimuovere
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(noMemory) {
+        fsp_parser_freeData(&parsed_data);
+        resp->code = 552;
+        strncpy(resp->description, "Requested file action aborted. Exceeded storage allocation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(notOpened) {
+        // Il file non è stato aperto oppure non è stato aperto in modo corretto (con flag O_CREATE)
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     if(notLocked) {
-        // Il client non ha settato la lock sul file
-        *code = 554;
-        strncpy(description, "Requested action not taken. No access.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        // Il client non detiene la lock sul file
+        resp->code = 554;
+        strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
     return 0;
 }
 
-int close_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
+int close_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
     
-    // Cerca il file
+    resp->data_len = 0;
+    resp->data = NULL;
+    
     struct fsp_file* file;
     int notOpened = 0;
     
     pthread_mutex_lock(&files_mutex);
-    file = fsp_files_bst_search(files, pathname);
+    // Cerca il file
+    file = fsp_files_hash_table_search(files, req->arg);
     if(file != NULL) {
-        if(fsp_files_list_contains(client_info->openedFiles, pathname)) {
+        if(fsp_files_list_contains(client->openedFiles, req->arg)) {
+            // Rimuove il file dalla lista dei file aperti del client
+            fsp_files_list_remove(&(client->openedFiles), req->arg);
+            // Rimuove la lock se la detiene
+            if(file->locked == client->sfd) {
+                file->locked = -1;
+                pthread_cond_broadcast(&lock_cmd_isNotLocked);
+            }
             // Rimuove il link dal file
             file->links--;
-            // Rimuove il file dalla lista dei file aperti del client
-            fsp_files_list_remove(&(client_info->openedFiles), pathname);
-            // Rimuove il file se remove == 1 e links == 0
-            if(file->remove && file->links == 0) {
-                storage_size -= file->size;
-                fsp_files_bst_delete(&files, pathname);
-                fsp_file_free(file);
-            } else {
-                // Rimuove la lock se la detiene
-                if(file->locked == client_info->sfd) {
-                    file->locked = -1;
-                    pthread_cond_broadcast(&lock_cmd_isNotLocked);
+            // Rimuove il file se links == 0
+            if(file->links == 0) {
+                if(file->data == NULL) {
+                    fsp_files_queue_remove(files_queue, req->arg);
+                    files_num--;
+                }
+                if(file->remove || file->data == NULL) {
+                    fsp_files_hash_table_delete(files, req->arg);
+                    fsp_file_free(file);
                 }
             }
         } else {
@@ -820,248 +1105,56 @@ int close_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* descript
     
     if(file == NULL) {
         // File non trovato
-        *code = 550;
-        strncpy(description, "Requested action not taken. File not found.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     if(notOpened) {
         // File non aperto dal client
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
     return 0;
 }
 
-int lock_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
+int lock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
     
-    // Cerca il file
-    struct fsp_file* file;
-    int file_not_opened = 0;
-    int locked = 0;
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    FSP_FILE file;
+    int notOpened = 0;
     
     pthread_mutex_lock(&files_mutex);
-    file = fsp_files_bst_search(files, pathname);
+    // Cerca il file
+    file = fsp_files_hash_table_search(files, req->arg);
+    // Se il file esiste ma deve essere rimosso, allora non esegue il comando
+    if(file != NULL && file->remove) file = NULL;
     if(file != NULL) {
-        if(!fsp_files_list_contains(client_info->openedFiles, pathname)) {
+        // File trovato
+        if(!fsp_files_list_contains(client->openedFiles, req->arg)) {
             // Il client non ha aperto il file
-            file_not_opened = 1;
-        } else if(file->locked < 0 || file->locked == client_info->sfd) {
-            // È già stata settata la lock sul file
-            file->locked = client_info->sfd;
-            locked = 1;
-        }
-    }
-    pthread_mutex_unlock(&files_mutex);
-    
-    if(file == NULL) {
-        // File non trovato
-        *code = 550;
-        strncpy(description, "Requested action not taken. File not found.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    if(file_not_opened) {
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    if(locked) {
-        *code = 200;
-        strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    
-    // Attende di ottenere la lock su una variabile di condizione
-    pthread_mutex_lock(&files_mutex);
-    while(file->locked >= 0) {
-        pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
-    }
-    file->locked = client_info->sfd;
-    pthread_mutex_unlock(&files_mutex);
-    
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    
-    return 0;
-}
-
-int open_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
-    
-    // Cerca il file
-    struct fsp_file* file;
-    
-    pthread_mutex_lock(&files_mutex);
-    file = fsp_files_bst_search(files, pathname);
-    if(file != NULL) {
-        // Se il file sarà da rimuovere, allora non lo apre
-        if(file->remove) {
-            file = NULL;
-        } else if(!fsp_files_list_contains(client_info->openedFiles, pathname)) {
-            // Aggiunge un nuovo collegamento al file
-            file->links++;
-            // Aggiunge il file nella lista dei file aperti dal client
-            fsp_files_list_add(&(client_info->openedFiles), file);
-        }
-        // Se il file era già aperto dal client, allora non fa niente
-    }
-    pthread_mutex_unlock(&files_mutex);
-    
-    if(file == NULL) {
-        // File non trovato
-        *code = 550;
-        strncpy(description, "Requested action not taken. File not found.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
-    
-    return 0;
-}
-
-int openc_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
-    
-    // Cerca il file
-    int already_exists = 0;
-    int remove = 0;
-    
-    pthread_mutex_lock(&files_mutex);
-    struct fsp_file* file = fsp_files_bst_search(files, pathname);
-    if(file == NULL) {
-        // Il file non esiste
-        // Crea il file
-        if((file = fsp_file_new(pathname, NULL, 0, 1, -1, 0)) == NULL) {
-            pthread_mutex_unlock(&files_mutex);
-            return -1;
-        }
-        // Aggiunge il file all'albero
-        fsp_files_bst_insert(&files, file);
-        // Aggiunge il file nella lista dei file aperti dal client
-        fsp_files_list_add(&(client_info->openedFiles), file);
-    } else if(file->remove) {
-        // Il file esiste
-        // Non permette l'operazione anche se il file ha remove == 1
-        remove = 1;
-    } else {
-        // Il file esiste
-        already_exists = 1;
-    }
-    pthread_mutex_unlock(&files_mutex);
-    
-    if(already_exists) {
-        // File già esistente
-        *code = 555;
-        strncpy(description, "Requested action not taken. File already exists.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    if(remove) {
-        // Impossibile eseguire l'operazione perchè il file non è ancora stato chiuso da tutti i client
-        // per la cancellazione
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
-    
-    return 0;
-}
-
-int opencl_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
-    
-    // Cerca il file
-    int already_exists = 0;
-    int remove = 0;
-    
-    pthread_mutex_lock(&files_mutex);
-    struct fsp_file* file = fsp_files_bst_search(files, pathname);
-    if(file == NULL) {
-        // Il file non esiste
-        // Crea il file
-        if((file = fsp_file_new(pathname, NULL, 0, 1, client_info->sfd, 0)) == NULL) {
-            pthread_mutex_unlock(&files_mutex);
-            return -1;
-        }
-        // Aggiunge il file all'albero
-        fsp_files_bst_insert(&files, file);
-        // Aggiunge il file nella lista dei file aperti dal client
-        fsp_files_list_add(&(client_info->openedFiles), file);
-    } else if(file->remove) {
-        // Il file esiste
-        // Non permette l'operazione anche se il file ha remove == 1
-        remove = 1;
-    } else {
-        // Il file esiste
-        already_exists = 1;
-    }
-    pthread_mutex_unlock(&files_mutex);
-    
-    if(already_exists) {
-        // File già esistente
-        *code = 555;
-        strncpy(description, "Requested action not taken. File already exists.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    if(remove) {
-        // Impossibile eseguire l'operazione perchè il file non è ancora stato chiuso da tutti i client
-        // per la cancellazione
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
-    
-    return 0;
-}
-
-int openl_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
-    
-    // Cerca il file
-    struct fsp_file* file;
-    int alreadyLocked = 0;
-    
-    pthread_mutex_lock(&files_mutex);
-    file = fsp_files_bst_search(files, pathname);
-    if(file != NULL) {
-        if(file->remove) {
-            // Se il file sarà da rimuovere, allora non lo apre
-            file = NULL;
-        } else if(file->locked >= 0 && file->locked != client_info->sfd) {
-            alreadyLocked = 1;
-        } else if(file->locked < 0) {
-            // Se il file era già aperto dal client, esso viene riaperto con lock
+            notOpened = 1;
+        } else if(file->locked < 0 || file->locked == client->sfd) {
             // Setta la lock
-            file->locked = client_info->sfd;
-            if(!fsp_files_list_contains(client_info->openedFiles, pathname)) {
-                // Aggiunge un nuovo collegamento al file
-                file->links++;
-                // Aggiunge il file nella lista dei file aperti dal client
-                fsp_files_list_add(&(client_info->openedFiles), file);
+            file->locked = client->sfd;
+        } else {
+            // Attende di ottenere la lock su una variabile di condizione
+            while(file->locked >= 0 && !file->remove) {
+                pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
+            }
+            if(file->remove) {
+                file = NULL;
+            } else {
+                file->locked = client->sfd;
             }
         }
     }
@@ -1069,54 +1162,312 @@ int openl_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* descript
     
     if(file == NULL) {
         // File non trovato
-        *code = 550;
-        strncpy(description, "Requested action not taken. File not found.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(alreadyLocked) {
-        // Lock già settata sul file da un altro client
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+    if(notOpened) {
+        // File non aperto dal client
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
     
     return 0;
 }
 
-int read_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL || data_len == NULL || data == NULL) return -1;
+int open_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
     
-    struct fsp_file* file;
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    FSP_FILE file;
+    
+    pthread_mutex_lock(&files_mutex);
+    // Cerca il file
+    file = fsp_files_hash_table_search(files, req->arg);
+    // Se il file esiste ma deve essere rimosso, allora non esegue il comando
+    if(file != NULL && file->remove) file = NULL;
+    if(file != NULL) {
+        if(!fsp_files_list_contains(client->openedFiles, req->arg)) {
+            // File non ancora aperto dal client
+            // Aggiunge un nuovo collegamento al file
+            file->links++;
+            // Aggiunge il file nella lista dei file aperti dal client
+            fsp_files_list_add(&(client->openedFiles), file);
+        }
+        // Se il file era già aperto dal client, allora non fa niente
+    }
+    pthread_mutex_unlock(&files_mutex);
+    
+    if(file == NULL) {
+        // File non trovato
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
+    return 0;
+}
+
+int openc_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
+    
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    if(config_file.files_max_num == 0) {
+        resp->code = 552;
+        strncpy(resp->description, "Requested file action aborted. Exceeded storage allocation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    int alreadyExists = 0;
+    int notRemoved = 0;
+    
+    FSP_FILE file;
+    
+    pthread_mutex_lock(&files_mutex);
+    // Controlla se il file esiste
+    file = fsp_files_hash_table_search(files, req->arg);
+    if(file == NULL) {
+        // Il file non esiste
+        // Crea il file
+        if((file = fsp_file_new(req->arg, NULL, 0, 1, 0, 0)) == NULL) {
+            pthread_mutex_unlock(&files_mutex);
+            return -1;
+        }
+        files_num++;
+        
+        // Espelle un file dalla memoria se necessario
+        if(files_num > config_file.files_max_num) {
+            if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
+                fsp_file_free(file);
+                files_num--;
+                pthread_mutex_unlock(&files_mutex);
+                return -1;
+            }
+        }
+        
+        // Aggiunge il file alla tabella hash, alla coda e alla lista dei file aperti dal client
+        fsp_files_hash_table_insert(files, file);
+        fsp_files_queue_enqueue(files_queue, file);
+        fsp_files_list_add(&(client->openedFiles), file);
+        
+        // Aggiorna la statistica
+        if(files_num > files_max_reached_num) files_max_reached_num = files_num;
+    } else {
+        if(file->remove) {
+            notRemoved = 1;
+        } else {
+            alreadyExists = 1;
+        }
+    }
+    pthread_mutex_unlock(&files_mutex);
+    
+    if(alreadyExists) {
+        // File già esistente
+        resp->code = 555;
+        strncpy(resp->description, "Requested action not taken. File already exists.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(notRemoved) {
+        // File non ancora rimosso (attende di essere chiuso da tutti i client)
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
+    return 0;
+}
+
+int opencl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
+    
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    if(config_file.files_max_num == 0) {
+        resp->code = 552;
+        strncpy(resp->description, "Requested file action aborted. Exceeded storage allocation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    int alreadyExists = 0;
+    int notRemoved = 0;
+    
+    FSP_FILE file;
+    
+    pthread_mutex_lock(&files_mutex);
+    // Controlla se il file esiste
+    file = fsp_files_hash_table_search(files, req->arg);
+    if(file == NULL) {
+        // Il file non esiste
+        // Crea il file
+        if((file = fsp_file_new(req->arg, NULL, 0, 1, client->sfd, 0)) == NULL) {
+            pthread_mutex_unlock(&files_mutex);
+            return -1;
+        }
+        files_num++;
+        
+        // Espelle un file dalla memoria se necessario
+        if(files_num > config_file.files_max_num) {
+            if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
+                fsp_file_free(file);
+                files_num--;
+                pthread_mutex_unlock(&files_mutex);
+                return -1;
+            }
+        }
+        
+        // Aggiunge il file alla tabella hash, alla coda e alla lista dei file aperti dal client
+        fsp_files_hash_table_insert(files, file);
+        fsp_files_queue_enqueue(files_queue, file);
+        fsp_files_list_add(&(client->openedFiles), file);
+        
+        // Aggiorna la statistica
+        if(files_num > files_max_reached_num) files_max_reached_num = files_num;
+    } else {
+        if(file->remove) {
+            notRemoved = 1;
+        } else {
+            alreadyExists = 1;
+        }
+    }
+    pthread_mutex_unlock(&files_mutex);
+    
+    if(alreadyExists) {
+        // File già esistente
+        resp->code = 555;
+        strncpy(resp->description, "Requested action not taken. File already exists.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(notRemoved) {
+        // File non ancora rimosso (attende di essere chiuso da tutti i client)
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
+    return 0;
+}
+
+int openl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
+    
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    int locked = 0;
+    
+    FSP_FILE file;
+    
+    pthread_mutex_lock(&files_mutex);
+    // Cerca il file
+    file = fsp_files_hash_table_search(files, req->arg);
+    // Se il file esiste ma deve essere rimosso, allora non esegue il comando
+    if(file != NULL && file->remove) file = NULL;
+    if(file != NULL) {
+        if(file->locked < 0) {
+            // Nessuno detiene la lock sul file
+            if(!fsp_files_list_contains(client->openedFiles, req->arg)) {
+                // File non ancora aperto dal client
+                // Aggiunge un nuovo collegamento al file
+                file->links++;
+                // Setta la lock al file
+                file->locked = client->sfd;
+                // Aggiunge il file nella lista dei file aperti dal client
+                fsp_files_list_add(&(client->openedFiles), file);
+            } else {
+                // File già aperto dal client
+                // Setta la lock al file
+                file->locked = client->sfd;
+            }
+        } else if(file->locked == client->sfd) {
+            // Il file è già aperto dal client e il client detiene già la lock sul file
+        } else {
+            locked = 1;
+        }
+    }
+    pthread_mutex_unlock(&files_mutex);
+    
+    if(file == NULL) {
+        // File non trovato
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(locked) {
+        // Un altro client ha settato la lock sul file
+        resp->code = 554;
+        strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
+    return 0;
+}
+
+int read_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
+    
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    FSP_FILE file;
     int notOpened = 0;
     int locked = 0;
     
     pthread_mutex_lock(&files_mutex);
     // Cerca il file
-    file = fsp_files_bst_search(files, pathname);
+    file = fsp_files_hash_table_search(files, req->arg);
+    // Se il file esiste ma deve essere rimosso, allora non esegue il comando
+    if(file != NULL && file->remove) file = NULL;
     if(file != NULL) {
-        if(fsp_files_list_contains(client_info->openedFiles, pathname)) {
+        if(fsp_files_list_contains(client->openedFiles, req->arg)) {
             // Il file è stato aperto dal client
-            if(file->locked < 0 || (file->locked >= 0 && file->locked == client_info->sfd)) {
+            if(file->locked < 0 || (file->locked >= 0 && file->locked == client->sfd)) {
                 // Il file si può leggere
-                size_t buf_size = file->size + strlen(pathname) + 32;
-                if((*data = malloc(buf_size)) == NULL) {
+                size_t buf_size = file->size + strlen(file->pathname) + 32;
+                if((resp->data = malloc(buf_size)) == NULL) {
                     pthread_mutex_unlock(&files_mutex);
                     return -1;
                 }
                 long int wrote_bytes = 0;
-                wrote_bytes = fsp_parser_makeData(data, &buf_size, 0, 1, pathname, file->size, file->data);
+                wrote_bytes = fsp_parser_makeData(resp->data, &buf_size, 0, 1, file->pathname, file->size, file->data);
                 if(wrote_bytes < 0) {
-                    free(*data);
+                    free(resp->data);
                     pthread_mutex_unlock(&files_mutex);
                     return -1;
                 }
-                *data_len = wrote_bytes;
+                resp->data_len = wrote_bytes;
             } else {
                 locked = 1;
             }
@@ -1128,268 +1479,358 @@ int read_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* descripti
     
     if(file == NULL) {
         // File non trovato
-        *code = 550;
-        strncpy(description, "Requested action not taken. File not found.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     if(notOpened) {
         // File non aperto dal client
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     if(locked) {
         // Un altro client ha settato la lock sul file
-        *code = 554;
-        strncpy(description, "Requested action not taken. No access.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        resp->code = 554;
+        strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
     return 0;
 }
 
-int readn_cmd(CLIENT_INFO client_info, long int n, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data) {
-    if(client_info == NULL || code == NULL || description == NULL || data_len == NULL || data == NULL) return -1;
+int readn_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
+    
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    long int n;
+    if(!isNumber(req->arg, &n)) {
+        resp->code = 501;
+        strncpy(resp->description, "Syntax error, message unrecognised.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
     
     pthread_mutex_lock(&files_mutex);
-    size_t buf_size;
-    // Stima la dimensione del buffer
-    if(n <= 0) {
-        buf_size = storage_size + files_num*(256 + 32);
-    } else {
-        buf_size = storage_size/n + n*(256 + 32);
-    }
-    if((*data = malloc(buf_size)) == NULL) return -1;
+    unsigned int availableFiles = 0;
+    size_t buf_size = 0;
     
-    long int wrote_bytes_tot = 0;
+    // Calcola il numero di file disponibili
+    struct fsp_files_hash_table_iterator* iterator = fsp_files_hash_table_getIterator(files);
+    FSP_FILE file = fsp_files_hash_table_getNext(iterator);
     
-    wrote_bytes_tot = fsp_parser_makeData(data, &buf_size, 0, n > 0 ? (int) n : files_num, files->pathname, files->size, files->data);
-    if(wrote_bytes_tot < 0) {
-        free(*data);
-        return -1;
+    while((file = fsp_files_hash_table_getNext(iterator)) != NULL || n > 0) {
+        // Non legge i file da rimuovere e i file in stato locked di cui il client non detiene la lock
+        if(file->remove || (file->locked >=0 && file->locked != client->sfd)) {
+            continue;
+        }
+        availableFiles++;
+        buf_size += file->size;
+        if(n > 0) n--;
     }
+    free(iterator);
     
-    if(readn_rec(files->left, &n, &wrote_bytes_tot, &buf_size, data) != 0) {
-        free(*data);
-        return -1;
+    if(availableFiles > 0) {
+        
+        // Stima la dimensione del buffer e alloca la memoria
+        buf_size += availableFiles*(256 + 32);
+        if((resp->data = malloc(buf_size)) == NULL) {
+            pthread_mutex_unlock(&files_mutex);
+            return -1;
+        }
+        
+        // Prepara l'iteratore
+        iterator = fsp_files_hash_table_getIterator(files);
+        FSP_FILE file = fsp_files_hash_table_getNext(iterator);
+        
+        // Non legge un file da rimuovere o un file in stato locked di cui il client non detiene la lock
+        while(file->remove || (file->locked >=0 && file->locked != client->sfd)) {
+            if((file = fsp_files_hash_table_getNext(iterator)) == NULL) break;
+        }
+        
+        // Legge i file
+        long int wrote_bytes = 0;
+        long int wrote_bytes_tot = 0;
+        
+        wrote_bytes_tot = fsp_parser_makeData(resp->data, &buf_size, 0, availableFiles, file->pathname, file->size, file->data);
+        if(wrote_bytes_tot < 0) {
+            free(resp->data);
+            resp->data = NULL;
+            free(iterator);
+            pthread_mutex_unlock(&files_mutex);
+            return -1;
+        }
+        
+        while((file = fsp_files_hash_table_getNext(iterator)) != NULL || n > 0) {
+            // Non legge i file da rimuovere e i file in stato locked di cui il client non detiene la lock
+            if(file->remove || (file->locked >=0 && file->locked != client->sfd)) continue;
+            
+            wrote_bytes = fsp_parser_makeData(resp->data, &buf_size, wrote_bytes_tot, 0, file->pathname, file->size, file->data);
+            if(wrote_bytes < 0) {
+                free(resp->data);
+                resp->data = NULL;
+                free(iterator);
+                pthread_mutex_unlock(&files_mutex);
+                return -1;
+            }
+            wrote_bytes_tot += wrote_bytes;
+            if(n > 0) n--;
+        }
+        
+        resp->data_len = wrote_bytes_tot;
+        free(iterator);
     }
-    if(readn_rec(files->right, &n, &wrote_bytes_tot, &buf_size, data) != 0) {
-        free(*data);
-        return -1;
-    }
-    *data_len = wrote_bytes_tot;
     pthread_mutex_unlock(&files_mutex);
     
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
     return 0;
 }
 
-int readn_rec(struct fsp_file* root_file, long int* n, long int* wrote_bytes_tot, size_t* data_len, void** data) {
-    if(root_file == NULL || *n == 0) return 0;
-    long int wrote_bytes = 0;
-    wrote_bytes = fsp_parser_makeData(data, data_len, *wrote_bytes_tot, -1, root_file->pathname, root_file->size, root_file->data);
-    if(wrote_bytes < 0) {
-        return -1;
-    }
-    (*n)--;
-    *wrote_bytes_tot += wrote_bytes;
+int remove_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
     
-    if(readn_rec(root_file->left, n, wrote_bytes_tot, data_len, data) == -1) return -1;
-    if(readn_rec(root_file->right, n, wrote_bytes_tot, data_len, data) == -1) return -1;
-    return 0;
-}
-
-int remove_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
+    resp->data_len = 0;
+    resp->data = NULL;
     
     struct fsp_file* file;
+    int notOpened = 0;
     int notLocked = 0;
     
     pthread_mutex_lock(&files_mutex);
     // Cerca il file
-    file = fsp_files_bst_search(files, pathname);
+    file = fsp_files_hash_table_search(files, req->arg);
+    if(file != NULL && file->remove) file = NULL;
     if(file != NULL) {
-        if(file->locked == client_info->sfd) {
-            file->remove = 1;
-            // Il file viene rimosso dal server solo quando file->links == 0
+        if(fsp_files_list_contains(client->openedFiles, req->arg)) {
+            if(file->locked == client->sfd) {
+                // Il file viene rimosso dal server solo quando file->links == 0
+                file->remove = 1;
+                fsp_files_queue_remove(files_queue, req->arg);
+                files_num--;
+                storage_size -= file->size;
+                pthread_cond_broadcast(&lock_cmd_isNotLocked);
+            } else {
+                notLocked = 1;
+            }
         } else {
-            notLocked = 1;
+            notOpened = 1;
         }
     }
     pthread_mutex_unlock(&files_mutex);
     
     if(file == NULL) {
-        // File non trovato
-        *code = 550;
-        strncpy(description, "Requested action not taken. File not found.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        // File non trovato o già da rimuovere
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(notOpened) {
+        // Il client non ha aperto il file
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     if(notLocked) {
-        // Il client non ha aperto il file o non è l'owner della lock
-        *code = 554;
-        strncpy(description, "Requested action not taken. No access.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+        // Il client non detiene la lock sul file
+        resp->code = 554;
+        strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
     return 0;
 }
 
-int unlock_cmd(CLIENT_INFO client_info, char* pathname, int* code, char* description, const size_t descr_max_len) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL) return -1;
+int unlock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
     
-    // Cerca il file
-    struct fsp_file* file;
-    int locked;
+    resp->data_len = 0;
+    resp->data = NULL;
     
-    pthread_mutex_lock(&files_mutex);
-    file = fsp_files_bst_search(files, pathname);
-    if(file != NULL) locked = file->locked;
-    pthread_mutex_unlock(&files_mutex);
-    
-    if(file == NULL) {
-        // File non trovato
-        *code = 550;
-        strncpy(description, "Requested action not taken. File not found.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    if(!fsp_files_list_contains(client_info->openedFiles, pathname) || locked != client_info->sfd) {
-        // Il client non ha aperto il file o non è l'owner della lock
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    
-    // Rilascia la lock
-    pthread_mutex_lock(&files_mutex);
-    file->locked = -1;
-    pthread_cond_broadcast(&lock_cmd_isNotLocked);
-    pthread_mutex_unlock(&files_mutex);
-    
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
-    return 0;
-}
-
-int write_cmd(CLIENT_INFO client_info, char* pathname, struct fsp_data* parsed_data, int* code, char* description, const size_t descr_max_len, size_t* data_len, void** data) {
-    if(client_info == NULL || pathname == NULL || code == NULL || description == NULL || data_len == NULL || data == NULL) return -1;
-    
-    struct fsp_file* file;
+    FSP_FILE file;
     int notOpened = 0;
-    int removed = 0;
-    int notCreated_or_notLocked = 0;
-    int noMemory = 0;
+    int notLocked = 0;
     
     pthread_mutex_lock(&files_mutex);
     // Cerca il file
-    file = fsp_files_bst_search(files, pathname);
+    file = fsp_files_hash_table_search(files, req->arg);
+    // Se il file esiste ma deve essere rimosso, allora non esegue il comando
+    if(file != NULL && file->remove) file = NULL;
     if(file != NULL) {
-        if(!file->remove) {
-            if(fsp_files_list_contains(client_info->openedFiles, pathname)) {
-                // Il file è stato aperto dal client
-                if(file->data == NULL && file->locked >= 0 && file->locked == client_info->sfd) {
-                    // Il file si può scrivere
-                    if((file->data = malloc(sizeof(parsed_data->sizes[0]))) == NULL) {
-                        pthread_mutex_unlock(&files_mutex);
-                        return -1;
-                    }
-                    memcpy(file->data, parsed_data->data[0], parsed_data->sizes[0]);
-                    file->size = parsed_data->sizes[0];
-                    storage_size += parsed_data->sizes[0];
-                    
-                    // Espelle i file dalla memoria se necessario
-                    if(storage_size > storage_max_size) {
-                        int n = 0;
-                        size_t _tot_size = 0;
-                        struct fsp_file* _file;
-                        struct fsp_file_pathname* _file_pathname = pathnames_queue->head;
-                        while(storage_size > storage_max_size) {
-                            _file = fsp_files_bst_search(files, _file_pathname->pathname);
-                            _file->remove = 1;
-                            storage_size -= _file->size;
-                            n++;
-                            _tot_size += _file->size + strlen(_file->pathname) + 32;
-                            _file_pathname = _file_pathname->next;
-                        }
-                        
-                        if((*data = malloc(_tot_size)) == NULL) {
-                            pthread_mutex_unlock(&files_mutex);
-                            return -1;
-                        }
-                        
-                        long int wrote_bytes_tot = 0;
-                        long int wrote_bytes = 0;
-                        _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
-                        _file = fsp_files_bst_search(files, _file_pathname->pathname);
-                        wrote_bytes = fsp_parser_makeData(data, &_tot_size, 0, n, pathname, _file->size, _file->data);
-                        if(wrote_bytes < 0) {
-                            pthread_mutex_unlock(&files_mutex);
-                            return -1;
-                        }
-                        wrote_bytes_tot += wrote_bytes;
-                        for(int i = 0; i < n-1; i++) {
-                            _file_pathname = fsp_files_queue_dequeue(pathnames_queue);
-                            _file = fsp_files_bst_search(files, _file_pathname->pathname);
-                            wrote_bytes = fsp_parser_makeData(data, &_tot_size, wrote_bytes, n, pathname, _file->size, _file->data);
-                            if(wrote_bytes < 0) {
-                                pthread_mutex_unlock(&files_mutex);
-                                return -1;
-                            }
-                            wrote_bytes_tot += wrote_bytes;
-                        }
-                        *data_len = wrote_bytes;
-                    }
-                } else  {
-                    notCreated_or_notLocked = 1;
-                }
-            } else {
-                notOpened = 1;
-            }
-        } else {
-            removed = 1;
+        if(!fsp_files_list_contains(client->openedFiles, req->arg)) {
+            // Il file non è stato aperto dal client
+            notOpened = 1;
+        } else if(file->locked >= 0 && file->locked != client->sfd) {
+            // Il file ha la lock settata da un altro client
+            notLocked = 1;
+        } else if(file->locked >= 0){
+            // Rilascia la lock
+            file->locked = -1;
+            pthread_cond_broadcast(&lock_cmd_isNotLocked);
         }
     }
     pthread_mutex_unlock(&files_mutex);
     
-    if(file == NULL || notOpened || removed) {
-        // File inesistente o non aperto dal client
-        *code = 556;
-        strncpy(description, "Cannot perform the operation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+    if(file == NULL) {
+        // File non trovato o file da rimuovere
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(notCreated_or_notLocked) {
-        // Il file non è stato aperto con il flag CREATE o il client non ha settato la lock su di esso
-        *code = 554;
-        strncpy(description, "Requested action not taken. No access.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+    if(notOpened) {
+        // Il client non ha aperto il file
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(noMemory) {
-        // È stato superato il limite di numeri di file memorizzabili
-        *code = 552;
-        strncpy(description, "Requested file action aborted. Exceeded storage allocation.", descr_max_len);
-        description[descr_max_len-1] = '\0';
+    if(notLocked) {
+        // Il client non detiene la lock sul file
+        resp->code = 554;
+        strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
         return 0;
     }
     
-    *code = 200;
-    strncpy(description, "The requested action has been successfully completed.", descr_max_len);
-    description[descr_max_len-1] = '\0';
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
+    return 0;
+}
+
+int write_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+    if(client == NULL || req == NULL || resp == NULL) return -1;
+    
+    resp->data_len = 0;
+    resp->data = NULL;
+    
+    // Dati contenuti nel campo data
+    struct fsp_data parsed_data;
+    
+    // Legge i dati
+    switch (fsp_parser_parseData(req->data_len, req->data, &parsed_data)) {
+        case -1:
+            // data_len <= 0 || data == NULL || parsed_data == NULL
+        case -2:
+            // Il campo data del messaggio è incompleto
+        case -3:
+            // Il campo data del messaggio contiene errori sintattici
+            resp->code = 501;
+            strncpy(resp->description, "Syntax error, message unrecognised.", descr_max_len);
+            resp->description[descr_max_len-1] = '\0';
+            return 0;
+        case -4:
+            // Impossibile allocare memoria nello heap
+            return -1;
+        default:
+            // Successo
+            break;
+    }
+    if(parsed_data.n != 1) {
+        fsp_parser_freeData(&parsed_data);
+        resp->code = 501;
+        strncpy(resp->description, "Syntax error, message unrecognised.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(parsed_data.sizes[0] > config_file.storage_max_size) {
+        fsp_parser_freeData(&parsed_data);
+        resp->code = 552;
+        strncpy(resp->description, "Requested file action aborted. Exceeded storage allocation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    FSP_FILE file;
+    int notOpened = 0;
+    int notLocked = 0;
+    
+    pthread_mutex_lock(&files_mutex);
+    // Cerca il file
+    file = fsp_files_hash_table_search(files, req->arg);
+    // Se il file esiste ma deve essere rimosso, allora non esegue il comando
+    if(file != NULL && file->remove) file = NULL;
+    if(file != NULL) {
+        if(fsp_files_list_contains(client->openedFiles, req->arg) && file->data == NULL) {
+            // Il file è stato aperto dal client con flag O_CREATE
+            if(file->locked >= 0 && file->locked == client->sfd) {
+                // Il client detiene la lock sul file
+                if((file->data = malloc(parsed_data.sizes[0])) == NULL) {
+                    fsp_parser_freeData(&parsed_data);
+                    pthread_mutex_unlock(&files_mutex);
+                    return -1;
+                }
+                memcpy(file->data, parsed_data.data[0], parsed_data.sizes[0]);
+                file->size = parsed_data.sizes[0];
+                unsigned long int prev_storage_size = storage_size;
+                storage_size += parsed_data.sizes[0];
+                
+                // Espelle i file dalla memoria se necessario
+                if(storage_size > config_file.storage_max_size) {
+                    if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
+                        fsp_parser_freeData(&parsed_data);
+                        free(file->data);
+                        file->data = NULL;
+                        file->size = 0;
+                        storage_size = prev_storage_size;
+                        pthread_mutex_unlock(&files_mutex);
+                        return -1;
+                    }
+                }
+                
+                // Aggiorna la statistica
+                if(storage_size > storage_max_reached_size) storage_max_reached_size = storage_size;
+            } else  {
+                notLocked = 1;
+            }
+        } else {
+            notOpened = 1;
+        }
+    }
+    pthread_mutex_unlock(&files_mutex);
+    
+    fsp_parser_freeData(&parsed_data);
+    
+    if(file == NULL) {
+        // File inesistente o file da rimuovere
+        resp->code = 550;
+        strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(notOpened) {
+        // Il file non è stato aperto oppure non è stato aperto in modo corretto (senza flag O_CREATE)
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(notLocked) {
+        // Il client non detiene la lock sul file
+        resp->code = 554;
+        strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    
+    resp->code = 200;
+    strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+    resp->description[descr_max_len-1] = '\0';
     return 0;
 }

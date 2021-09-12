@@ -3,8 +3,8 @@
 
 #include <fsp_parser.h>
 
-// Dimensione massima del buffer (128MB)
-#define FSP_READER_BUF_MAX_SIZE 134217728
+// Dimensione massima del buffer (256MB)
+#define FSP_READER_BUF_MAX_SIZE 268435456
 
 /**
  * \brief Legge i byte da sfd che compongono un messaggio di richiesta fsp e salva i campi del

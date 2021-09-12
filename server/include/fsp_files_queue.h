@@ -16,6 +16,19 @@ struct fsp_files_queue {
 };
 
 /**
+ * \brief Restituisce una nuova coda.
+ *
+ * \return Una nuova coda,
+ *         NULL se non è stato possibile allocare la memoria.
+ */
+struct fsp_files_queue* fsp_files_queue_new(void);
+
+/**
+ * \brief Libera queue dalla memoria.
+ */
+void fsp_files_queue_free(struct fsp_files_queue* queue);
+
+/**
  * \brief Aggiunge file in fondo alla coda queue.
  *
  * \return 0 in caso di successo,

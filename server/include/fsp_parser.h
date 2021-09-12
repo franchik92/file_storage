@@ -3,8 +3,8 @@
 
 #include <stdlib.h>
 
-// Dimensione massima del buffer (128MB)
-#define FSP_PARSER_BUF_MAX_SIZE 134217728
+// Dimensione massima del buffer (256MB)
+#define FSP_PARSER_BUF_MAX_SIZE 268435456
 
 // Comandi dei messaggi di richiesta
 enum fsp_command { APPEND, CLOSE, LOCK, OPEN, OPENC, OPENCL, OPENL, QUIT, READ, READN, REMOVE, UNLOCK, WRITE };
@@ -115,8 +115,7 @@ int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data* parsed_da
  * (*buf e *size vengono modificati di conseguenza). La massima dimensione del buffer è definita in FSP_PARSER_BUF_MAX_SIZE.
  * Se n > 0, allora aggiunge a *buf il campo con il numero dei dati (N) insieme al dato definito dai campi
  * pathname (PATHNAME), data_size (SIZE) e data (data).
- * Se n < 0, allora aggiunge a *buf soltanto i campi del dato.
- * Se n == 0, allora aggiunge solo il valore n seguito da uno spazio (pathname, data_size e data vengono ignorati).
+ * Se n <= 0, allora aggiunge a *buf soltanto i campi del dato.
  * I campi PATHNAME e data saranno vuoti se, rispettivamente, pathname == NULL e data == NULL.
  * Inizia a scrivere a partire da (*buf)[offset].
  * Il comportamento è indefinito se la dimensione del dato data_size è superiore a quella effettiva in data.

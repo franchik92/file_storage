@@ -387,7 +387,7 @@ int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data* parsed_da
     if(*end == ' ') {
         *end = '\0';
         long int n;
-        if(!isNumber(start, &n) || n < 0) {
+        if(!isNumber(start, &n) || n <= 0) {
             return -3;
         }
         parsed_data->n = (int) n;
@@ -481,7 +481,7 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
     
     // n
     char n_str[12];
-    if(n >= 0) {
+    if(n > 0) {
         sprintf(n_str, "%d", n);
     }
     
@@ -490,14 +490,10 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
     sprintf(data_size_str, "%ld", data_size);
     
     long int n_str_len, pathname_len = 0, data_size_str_len = 0, tot_len;
-    n_str_len = n >= 0 ? strlen(n_str) : 0;
-    if(n != 0) {
-        pathname_len = pathname == NULL ? 0 : strlen(pathname);
-        data_size_str_len = strlen(data_size_str);
-        tot_len = (n_str_len > 0 ? n_str_len + 1 : 0) + pathname_len + data_size_str_len + data_size + 3;
-    } else {
-        tot_len = n_str_len + 1;
-    }
+    n_str_len = n > 0 ? strlen(n_str) : 0;
+    pathname_len = pathname == NULL ? 0 : strlen(pathname);
+    data_size_str_len = strlen(data_size_str);
+    tot_len = (n > 0 ? n_str_len + 1 : 0) + pathname_len + data_size_str_len + data_size + 3;
     
     // In C99 sizeof(char) dovrebbe essere sempre pari a 1
     assert(sizeof(char) == 1);
@@ -518,25 +514,23 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
     // Scrive nel buffer
     char* _buf = (char*) (*buf);
     _buf += offset;
-    if(n >= 0) {
+    if(n > 0) {
         memcpy(_buf, n_str, n_str_len);
         _buf += n_str_len;
         *_buf = ' ';
         _buf++;
     }
-    if(n != 0) {
-        if(pathname != NULL) memcpy(_buf, pathname, pathname_len);
-        _buf += pathname_len;
-        *_buf = ' ';
-        _buf++;
-        memcpy(_buf, data_size_str, data_size_str_len);
-        _buf += data_size_str_len;
-        *_buf = ' ';
-        _buf++;
-        if(data != NULL) memcpy(_buf, data, data_size);
-        _buf += data_size;
-        *_buf = ' ';
-    }
+    if(pathname != NULL) memcpy(_buf, pathname, pathname_len);
+    _buf += pathname_len;
+    *_buf = ' ';
+    _buf++;
+    memcpy(_buf, data_size_str, data_size_str_len);
+    _buf += data_size_str_len;
+    *_buf = ' ';
+    _buf++;
+    if(data != NULL) memcpy(_buf, data, data_size);
+    _buf += data_size;
+    *_buf = ' ';
     
     return tot_len;
 }

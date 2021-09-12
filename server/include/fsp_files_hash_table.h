@@ -15,8 +15,15 @@ struct fsp_files_hash_table {
     size_t size;
     // Numero dei file presenti nella tabella
     unsigned int files_num;
-    // Dimensione della memoria occupata dai file presenti nella tabella
-    unsigned long int storage_size;
+    // La tabella (vettore)
+    struct fsp_file** table;
+};
+
+struct fsp_files_hash_table_iterator {
+    // Indice della tabella
+    int index;
+    // File successivo
+    struct fsp_file* next;
     // La tabella (vettore)
     struct fsp_file** table;
 };
@@ -64,5 +71,22 @@ struct fsp_file* fsp_files_hash_table_delete(struct fsp_files_hash_table* hash_t
  *        Se completionHandler != NULL, passa come argomento alla funzione completionHandler ogni file prima di rimuoverlo.
  */
 void fsp_files_hash_table_deleteAll(struct fsp_files_hash_table* hash_table, void (*completionHandler) (struct fsp_file*));
+
+/**
+ * \brief Restituisce un iteratore per la tabella hash_table.
+ *        Dopo l'utilizzo liberare l'iteratore dalla memoria con free().
+ *
+ * \return Un iteratore,
+ *         NULL se hash_table == NULL || non è stato possibile allocare la memoria.
+ */
+struct fsp_files_hash_table_iterator* fsp_files_hash_table_getIterator(struct fsp_files_hash_table* hash_table);
+
+/**
+ * \brief Restituisce il file successivo in iterator.
+ *
+ * \return il file,
+ *         NULL se iterator == NULL || se non ci sono altri file.
+ */
+struct fsp_file* fsp_files_hash_table_getNext(struct fsp_files_hash_table_iterator* iterator);
 
 #endif
