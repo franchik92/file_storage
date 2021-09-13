@@ -154,6 +154,16 @@ static void signalHandler(int signal);
 static int parseConfigFile(void);
 
 /**
+ * \brief Stampa nel file di log l'esito del comando req->cmd richiesto dal client client->sfd ed eseguito dal thread thread_id.
+ *
+ * L'esito del comando viene determinato in base al codice di risposta fsp resp_code.
+ * Se il comando di richiesta è APPEND, READ, READN, REMOVE o WRITE e il codice di risposta è 200,
+ * allora stampa tra parentesi anche il numero di byte letti/scritti/rimossi.
+ * Non stampa nulla se client == NULL || req == NULL.
+ */
+static void updateLogFile(int thread_id, CLIENT client, struct fsp_request* req, int resp_code, unsigned long int bytes);
+
+/**
  * \brief Funzione eseguita dai thread worker.
  *        Stampa nel file di log i comandi eseguiti.
  */
@@ -723,6 +733,8 @@ static int parseConfigFile() {
 }
 
 static void updateLogFile(int thread_id, CLIENT client, struct fsp_request* req, int resp_code, unsigned long int bytes) {
+    if(client == NULL || req == NULL) return;
+    
     const size_t msg_size = 512;
     const size_t arg_max_len = 256;
     char msg[msg_size] = {0};
