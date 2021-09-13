@@ -463,7 +463,7 @@ int main(int argc, const char* argv[]) {
                         
                         // Scrive nel file di log
                         char msg[128] = {0};
-                        sprintf(msg, "Connection opened with %d\n", fd_c);
+                        sprintf(msg, "CONNECTION_OPENED: %d\n", fd_c);
                         write(log_file, msg, strlen(msg));
                         
                         // Crea un nuovo client
@@ -473,7 +473,7 @@ int main(int argc, const char* argv[]) {
                             close(fd_c);
                             
                             // Scrive nel file di log
-                            sprintf(msg, "Connection closed with %d (internal error)\n", fd_c);
+                            sprintf(msg, "CONNECTION_CLOSED: %d (internal error)\n", fd_c);
                             write(log_file, msg, strlen(msg));
                             
                             continue;
@@ -495,7 +495,7 @@ int main(int argc, const char* argv[]) {
                             close(fd_c);
                             
                             // Scrive nel file di log
-                            sprintf(msg, "Connection closed with %d (service not available)\n", fd_c);
+                            sprintf(msg, "CONNECTION_CLOSED: %d (service not available)\n", fd_c);
                             write(log_file, msg, strlen(msg));
                         } else {
                             // Invia il messaggio di risposta fsp con codice 220
@@ -503,7 +503,7 @@ int main(int argc, const char* argv[]) {
                                 close(fd_c);
                                 
                                 // Scrive nel file di log
-                                sprintf(msg, "Connection closed with %d (internal error)\n", fd_c);
+                                sprintf(msg, "CONNECTION_CLOSED: %d (internal error)\n", fd_c);
                                 write(log_file, msg, strlen(msg));
                                 
                                 continue;
@@ -638,10 +638,10 @@ static void closeConnection(CLIENT client, char* error_descr) {
     const size_t msg_size = 256;
     char msg[msg_size] = {0};
     if(error_descr != NULL) {
-        snprintf(msg, msg_size, "Connection closed with %d (%s)\n", client->sfd, error_descr);
+        snprintf(msg, msg_size, "CONNECTION_CLOSED: %d (%s)\n", client->sfd, error_descr);
         write(log_file, msg, strlen(msg));
     } else {
-        sprintf(msg, "Connection closed with %d\n", client->sfd);
+        sprintf(msg, "CONNECTION_CLOSED: %d\n", client->sfd);
         write(log_file, msg, strlen(msg));
     }
     
@@ -790,15 +790,13 @@ static void updateLogFile(int thread_id, CLIENT client, struct fsp_request* req,
         strncat(msg, req->arg, arg_max_len);
     }
     
-    char success_bytes[32] = {0};
     switch(resp_code) {
         case 200:
         case 220:
         case 221:
             // Success
             if(req->cmd == APPEND || req->cmd == READ || req->cmd == READN || req->cmd == REMOVE || req->cmd == WRITE) {
-                sprintf(success_bytes, " SUCCESS (%lu)\n", bytes);
-                strcat(msg, success_bytes);
+                sprintf(msg + strlen(msg), " SUCCESS (%lu)\n", bytes);
             } else {
                 strcat(msg, " SUCCESS\n");
             }
@@ -870,7 +868,7 @@ static void* worker(void* arg) {
             
             // Stampa nel file di log
             char msg[64] = {0};
-            sprintf(msg, "Client %d not found\n", sfd);
+            sprintf(msg, "CONNECTION_CLOSED: %d (client not found)\n", sfd);
             write(log_file, msg, strlen(msg));
             
             continue;
@@ -1115,14 +1113,17 @@ static int capacityMiss(void** data, size_t* data_len) {
     }
     if(data_len != NULL) *data_len = wrote_bytes;
     
+    // Messaggio per il file di log
+    size_t msg_size = 64 + n*512;
+    // VLA
+    char msg[msg_size];
+    sprintf(msg, "CAPACITY_MISS: %d (%lu)\n", n, prev_storage_size - storage_size);
     // Rimuove i file
-    char msg[512] = {0};
     for(int i = 0; i < n; i++) {
         file = fsp_files_queue_dequeue(files_queue);
         
-        // Scrive nel file di log
-        sprintf(msg, "Capacity miss: %s removed (%lu)\n", file->pathname, file->size);
-        write(log_file, msg, strlen(msg));
+        // Messaggio per il file di log
+        snprintf(msg + strlen(msg), 512, "REMOVED_FILE: %s (%lu)\n", file->pathname, file->size);
         
         if(file->links == 0) {
             // Rimuove il file
@@ -1138,6 +1139,9 @@ static int capacityMiss(void** data, size_t* data_len) {
     // Aggiorna la statistica
     capacity_misses++;
     pthread_mutex_unlock(&files_mutex);
+    
+    // Scrive nel file di log
+    write(log_file, msg, strlen(msg));
     
     return 0;
 }
