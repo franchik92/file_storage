@@ -19,16 +19,10 @@ struct fsp_file {
     // Se remove == 1 non sarà possibile eseguire operazioni su di esso tranne la chiusura
     unsigned short int remove;
     
-    // Campi usati per la gestione della tabella hash
-    // Nodo precedente
-    struct fsp_file* hash_table_prev;
-    // Nodo successivo
+    // Nodo successivo (usato per la gestione della tabella hash)
     struct fsp_file* hash_table_next;
     
-    // Campi usati per la gestione della coda FIFO
-    // Nodo precedente
-    struct fsp_file* queue_prev;
-    // Nodo successivo
+    // Nodo successivo (usato per la gestione della coda FIFO)
     struct fsp_file* queue_next;
 };
 
@@ -40,7 +34,7 @@ struct fsp_file {
  * \return Il nuovo file,
  *         NULL se non è stato possibile allocare la memoria.
  */
-struct fsp_file* fsp_file_new(const char* pathname, void* data, size_t size, int links, int locked, int remove);
+struct fsp_file* fsp_file_new(const char* pathname, const void* data, size_t size, int links, int locked, int remove);
 
 /**
  * \brief Libera file dalla memoria.

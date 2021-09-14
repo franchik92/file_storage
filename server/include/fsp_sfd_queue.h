@@ -48,6 +48,6 @@ int fsp_sfd_queue_dequeue(struct fsp_sfd_queue* queue);
  * \return 0 se non è vuota,
  *         1 se è vuota.
  */
-int fsp_sfd_queue_isEmpty(struct fsp_sfd_queue* queue);
+int fsp_sfd_queue_isEmpty(const struct fsp_sfd_queue* queue);
 
 #endif

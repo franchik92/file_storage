@@ -12,16 +12,14 @@ struct fsp_client {
     size_t size;
     // Lista dei file aperti
     struct fsp_files_list* openedFiles;
-    // Nodo precedente
-    struct fsp_client* prev;
     // Nodo successivo
     struct fsp_client* next;
 };
 
 /**
  * \brief Alloca memoria per un nuovo client e lo restituisce.
- *        I campi della struttura fsp_client conterranno sfd e buf_size (campo size)
- *        e un buffer (campo buf) di dimensione buf_size.
+ *        I campi della struttura fsp_client conterranno sfd, buf_size (size)
+ *        e un buffer (buf) di dimensione buf_size.
  *        Usare la funzione fsp_client_free per liberare il client dalla memoria.
  *
  * \return Il nuovo client,

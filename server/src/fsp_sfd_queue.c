@@ -41,6 +41,6 @@ int fsp_sfd_queue_dequeue(struct fsp_sfd_queue* queue) {
     return sfd;
 }
 
-int fsp_sfd_queue_isEmpty(struct fsp_sfd_queue* queue) {
+int fsp_sfd_queue_isEmpty(const struct fsp_sfd_queue* queue) {
     return queue->head == queue->tail;
 }

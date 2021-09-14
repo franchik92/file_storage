@@ -137,7 +137,7 @@ static void removeClient(CLIENT client);
  *        Stampa nel file di log l'avvenuta chiusura della connessione.
  *        Se error_descr != NULL, aggiunge error_descr nel file di log.
  */
-static void closeConnection(CLIENT client, char* error_descr);
+static void closeConnection(CLIENT client, const char* error_descr);
 
 /**
  * \brief Gestore dei segnali.
@@ -161,7 +161,7 @@ static int parseConfigFile(void);
  * allora stampa tra parentesi anche il numero di byte letti/scritti/rimossi.
  * Non stampa nulla se client == NULL || req == NULL.
  */
-static void updateLogFile(int thread_id, CLIENT client, struct fsp_request* req, int resp_code, unsigned long int bytes);
+static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_request* req, int resp_code, unsigned long int bytes);
 
 /**
  * \brief Funzione eseguita dai thread worker.
@@ -213,29 +213,29 @@ static int capacityMiss(void** data, size_t* data_len);
  * Se restituiscono -1 (errore), allora il relativo comando non è stato eseguito e
  * i valori salvati in resp non sono significativi.
  */
-static unsigned long int append_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static int close_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static int close_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static int lock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static int open_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static int open_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static int openc_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static int openc_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static int opencl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static int opencl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static int openl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static unsigned long int read_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static unsigned long int read_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static unsigned long int readn_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static unsigned long int readn_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static unsigned long int remove_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static unsigned long int remove_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static int unlock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static int unlock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
-static unsigned long int write_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
+static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
 int main(int argc, const char* argv[]) {
     
@@ -276,17 +276,35 @@ int main(int argc, const char* argv[]) {
     pthread_mutexattr_t mutex_attr;
     pthread_mutexattr_init(&mutex_attr);
     pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
-    if(pthread_mutex_init(&files_mutex, &mutex_attr) != 0 ||
-       pthread_mutex_init(&clients_mutex, NULL) != 0) {
+    if(pthread_mutex_init(&files_mutex, &mutex_attr) != 0) {
         fprintf(stderr, "Errore: mutex non creato.\n");
+        pthread_mutexattr_destroy(&mutex_attr);
+        freeAll();
+        close(log_file);
+        return -1;
+    }
+    pthread_mutexattr_destroy(&mutex_attr);
+    if(pthread_mutex_init(&clients_mutex, NULL) != 0) {
+        fprintf(stderr, "Errore: mutex non creato.\n");
+        pthread_mutex_destroy(&files_mutex);
         freeAll();
         close(log_file);
         return -1;
     }
     // Condition variables
-    if(pthread_cond_init(&sfd_queue_isNotEmpty, NULL) != 0 ||
-       pthread_cond_init(&lock_cmd_isNotLocked, NULL) != 0) {
+    if(pthread_cond_init(&sfd_queue_isNotEmpty, NULL) != 0) {
         fprintf(stderr, "Errore: variabile di condizione non creata.\n");
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        freeAll();
+        close(log_file);
+        return -1;
+    }
+    if(pthread_cond_init(&lock_cmd_isNotLocked, NULL) != 0) {
+        fprintf(stderr, "Errore: variabile di condizione non creata.\n");
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_cond_destroy(&sfd_queue_isNotEmpty);
         freeAll();
         close(log_file);
         return -1;
@@ -294,6 +312,10 @@ int main(int argc, const char* argv[]) {
     // Pipe senza nome per la comunicazione tra i thread worker e il thread master
     if(pipe(pfd) != 0) {
         fprintf(stderr, "Errore: pipe non creata.\n");
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_cond_destroy(&sfd_queue_isNotEmpty);
+        pthread_cond_destroy(&lock_cmd_isNotLocked);
         freeAll();
         close(log_file);
         return -1;
@@ -311,6 +333,10 @@ int main(int argc, const char* argv[]) {
        sigaction(SIGQUIT, &sa, NULL) != 0 ||
        sigaction(SIGHUP, &sa, NULL) != 0) {
         perror(NULL);
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_cond_destroy(&sfd_queue_isNotEmpty);
+        pthread_cond_destroy(&lock_cmd_isNotLocked);
         freeAll();
         close(pfd[0]);
         close(pfd[1]);
@@ -323,6 +349,10 @@ int main(int argc, const char* argv[]) {
     int sfd;
     if((sfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
         perror(NULL);
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_cond_destroy(&sfd_queue_isNotEmpty);
+        pthread_cond_destroy(&lock_cmd_isNotLocked);
         freeAll();
         close(pfd[0]);
         close(pfd[1]);
@@ -336,6 +366,10 @@ int main(int argc, const char* argv[]) {
     strncpy(sockaddr.sun_path, config_file.socket_file_name, UNIX_PATH_MAX);
     if(bind(sfd, (struct sockaddr*) &sockaddr, sizeof(sockaddr)) == -1) {
         perror(NULL);
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_cond_destroy(&sfd_queue_isNotEmpty);
+        pthread_cond_destroy(&lock_cmd_isNotLocked);
         freeAll();
         close(sfd);
         close(pfd[0]);
@@ -347,6 +381,10 @@ int main(int argc, const char* argv[]) {
     // listen
     if(listen(sfd, SOMAXCONN) == -1) {
         perror(NULL);
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_cond_destroy(&sfd_queue_isNotEmpty);
+        pthread_cond_destroy(&lock_cmd_isNotLocked);
         freeAll();
         close(sfd);
         close(pfd[0]);
@@ -361,6 +399,10 @@ int main(int argc, const char* argv[]) {
     pthread_t* threads = NULL;
     if((threads = malloc(sizeof(pthread_t)*config_file.worker_threads_num)) == NULL) {
         fprintf(stderr, "Errore: memoria insufficiente.\n");
+        pthread_mutex_destroy(&files_mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_cond_destroy(&sfd_queue_isNotEmpty);
+        pthread_cond_destroy(&lock_cmd_isNotLocked);
         freeAll();
         close(sfd);
         close(pfd[0]);
@@ -374,15 +416,20 @@ int main(int argc, const char* argv[]) {
             for(int j = 0; j <= i; j++) {
                 pthread_detach(threads[j]);
             }
+            pthread_mutex_destroy(&files_mutex);
+            pthread_mutex_destroy(&clients_mutex);
+            pthread_cond_destroy(&sfd_queue_isNotEmpty);
+            pthread_cond_destroy(&lock_cmd_isNotLocked);
             freeAll();
             close(sfd);
             close(pfd[0]);
             close(pfd[1]);
             free(threads);
             close(log_file);
+            return -1;
         }
     }
-    printf("Avvio dell'esecuzione dei thread worker.\n");
+    printf("Thread worker in esecuzione.\n");
     
     // select
     int ready_descriptors_num;
@@ -417,6 +464,10 @@ int main(int argc, const char* argv[]) {
                 for(int i = 0; i < config_file.worker_threads_num; i++) {
                     pthread_detach(threads[i]);
                 }
+                pthread_mutex_destroy(&files_mutex);
+                pthread_mutex_destroy(&clients_mutex);
+                pthread_cond_destroy(&sfd_queue_isNotEmpty);
+                pthread_cond_destroy(&lock_cmd_isNotLocked);
                 freeAll();
                 close(sfd);
                 close(pfd[0]);
@@ -554,6 +605,11 @@ int main(int argc, const char* argv[]) {
     free(threads);
     printf("Esecuzione dei thread worker terminata.\n");
     
+    pthread_mutex_destroy(&files_mutex);
+    pthread_mutex_destroy(&clients_mutex);
+    pthread_cond_destroy(&sfd_queue_isNotEmpty);
+    pthread_cond_destroy(&lock_cmd_isNotLocked);
+    
     // Stampa il sunto delle operazioni
     printf("--------------------------------\n");
     printf("Numero di file massimo memorizzato nel server: %d\n", files_max_reached_num);
@@ -603,7 +659,7 @@ static void removeClient(CLIENT client) {
     }
 }
 
-static void closeConnection(CLIENT client, char* error_descr) {
+static void closeConnection(CLIENT client, const char* error_descr) {
     if(client == NULL) return;
     
     pthread_mutex_lock(&clients_mutex);
@@ -732,7 +788,7 @@ static int parseConfigFile() {
     return 0;
 }
 
-static void updateLogFile(int thread_id, CLIENT client, struct fsp_request* req, int resp_code, unsigned long int bytes) {
+static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_request* req, int resp_code, unsigned long int bytes) {
     if(client == NULL || req == NULL) return;
     
     const size_t msg_size = 512;
@@ -1012,7 +1068,7 @@ static int receiveFspReq(CLIENT client, struct fsp_request* req) {
     return 0;
 }
 
-static int sendFspResp(CLIENT client, int code, const char* description, size_t data_len, void* data) {
+static int sendFspResp(const CLIENT client, int code, const char* description, size_t data_len, void* data) {
     if(client == NULL) return -1;
     
     // Genera il messaggio di risposta
@@ -1146,7 +1202,7 @@ static int capacityMiss(void** data, size_t* data_len) {
     return 0;
 }
 
-static unsigned long int append_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     unsigned long int bytes = 0;
@@ -1278,7 +1334,7 @@ static unsigned long int append_cmd(CLIENT client, struct fsp_request* req, stru
     return bytes;
 }
 
-static int close_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static int close_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     resp->data_len = 0;
@@ -1339,7 +1395,7 @@ static int close_cmd(CLIENT client, struct fsp_request* req, struct fsp_response
     return 0;
 }
 
-static int lock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     resp->data_len = 0;
@@ -1397,7 +1453,7 @@ static int lock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response*
     return 0;
 }
 
-static int open_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static int open_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     resp->data_len = 0;
@@ -1436,7 +1492,7 @@ static int open_cmd(CLIENT client, struct fsp_request* req, struct fsp_response*
     return 0;
 }
 
-static int openc_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static int openc_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     resp->data_len = 0;
@@ -1513,7 +1569,7 @@ static int openc_cmd(CLIENT client, struct fsp_request* req, struct fsp_response
     return 0;
 }
 
-static int opencl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static int opencl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     resp->data_len = 0;
@@ -1590,7 +1646,7 @@ static int opencl_cmd(CLIENT client, struct fsp_request* req, struct fsp_respons
     return 0;
 }
 
-static int openl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     resp->data_len = 0;
@@ -1650,7 +1706,7 @@ static int openl_cmd(CLIENT client, struct fsp_request* req, struct fsp_response
     return 0;
 }
 
-static unsigned long int read_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static unsigned long int read_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     unsigned long int bytes = 0;
@@ -1722,7 +1778,7 @@ static unsigned long int read_cmd(CLIENT client, struct fsp_request* req, struct
     return bytes;
 }
 
-static unsigned long int readn_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static unsigned long int readn_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     unsigned long int bytes = 0;
@@ -1815,7 +1871,7 @@ static unsigned long int readn_cmd(CLIENT client, struct fsp_request* req, struc
     return bytes;
 }
 
-static unsigned long int remove_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static unsigned long int remove_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     unsigned long int bytes = 0;
@@ -1877,7 +1933,7 @@ static unsigned long int remove_cmd(CLIENT client, struct fsp_request* req, stru
     return bytes;
 }
 
-static int unlock_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static int unlock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     resp->data_len = 0;
@@ -1935,7 +1991,7 @@ static int unlock_cmd(CLIENT client, struct fsp_request* req, struct fsp_respons
     return 0;
 }
 
-static unsigned long int write_cmd(CLIENT client, struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
+static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len) {
     if(client == NULL || req == NULL || resp == NULL) return -1;
     
     unsigned long int bytes = 0;

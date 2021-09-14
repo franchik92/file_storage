@@ -36,7 +36,7 @@ void fsp_clients_hash_table_free(struct fsp_clients_hash_table* hash_table);
  * \brief Aggiunge client nella tabella hash_table.
  *
  * \return 0 in caso di successo,
- *         -1 se hash_table == NULL,
+ *         -1 se hash_table == NULL || client == NULL,
  *         -2 se il client è già presente nella tabella.
  */
 int fsp_clients_hash_table_insert(struct fsp_clients_hash_table* hash_table, struct fsp_client* client);
@@ -47,7 +47,7 @@ int fsp_clients_hash_table_insert(struct fsp_clients_hash_table* hash_table, str
  * \return Il client con chiave sfd,
  *         NULL altrimenti.
  */
-struct fsp_client* fsp_clients_hash_table_search(struct fsp_clients_hash_table* hash_table, int sfd);
+struct fsp_client* fsp_clients_hash_table_search(const struct fsp_clients_hash_table* hash_table, int sfd);
 
 /**
  * \brief Rimuove il client con chiave sfd dalla tabella e lo restituisce.
@@ -59,7 +59,7 @@ struct fsp_client* fsp_clients_hash_table_delete(struct fsp_clients_hash_table* 
 
 /**
  * \brief Rimuove tutti i client presenti nella tabella hash_table.
- *        Se completionHandler != NULL, passa come argomento alla funzione completionHandler ogni client prima di rimuoverlo.
+ *        Se completionHandler != NULL, passa come argomento alla funzione completionHandler ogni client dopo averlo rimosso.
  */
 void fsp_clients_hash_table_deleteAll(struct fsp_clients_hash_table* hash_table, void (*completionHandler) (struct fsp_client*));
 

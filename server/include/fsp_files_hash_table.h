@@ -24,6 +24,8 @@ struct fsp_files_hash_table_iterator {
     int index;
     // File successivo
     struct fsp_file* next;
+    // Dimensione della tabella
+    size_t table_size;
     // La tabella (vettore)
     struct fsp_file** table;
 };
@@ -56,7 +58,7 @@ int fsp_files_hash_table_insert(struct fsp_files_hash_table* hash_table, struct 
  * \return Il file,
  *         NULL se hash_table == NULL || pathname == NULL || file non trovato.
  */
-struct fsp_file* fsp_files_hash_table_search(struct fsp_files_hash_table* hash_table, const char* pathname);
+struct fsp_file* fsp_files_hash_table_search(const struct fsp_files_hash_table* hash_table, const char* pathname);
 
 /**
  * \brief Rimuove il file con nome pathname dalla tabella hash_table e lo restituisce.
@@ -68,7 +70,7 @@ struct fsp_file* fsp_files_hash_table_delete(struct fsp_files_hash_table* hash_t
 
 /**
  * \brief Rimuove tutti i file presenti nella tabella hash_table.
- *        Se completionHandler != NULL, passa come argomento alla funzione completionHandler ogni file prima di rimuoverlo.
+ *        Se completionHandler != NULL, passa come argomento alla funzione completionHandler ogni file dopo averlo rimosso.
  */
 void fsp_files_hash_table_deleteAll(struct fsp_files_hash_table* hash_table, void (*completionHandler) (struct fsp_file*));
 
@@ -79,13 +81,13 @@ void fsp_files_hash_table_deleteAll(struct fsp_files_hash_table* hash_table, voi
  * \return Un iteratore,
  *         NULL se hash_table == NULL || non è stato possibile allocare la memoria.
  */
-struct fsp_files_hash_table_iterator* fsp_files_hash_table_getIterator(struct fsp_files_hash_table* hash_table);
+struct fsp_files_hash_table_iterator* fsp_files_hash_table_getIterator(const struct fsp_files_hash_table* hash_table);
 
 /**
  * \brief Restituisce il file successivo in iterator.
  *
  * \return il file,
- *         NULL se iterator == NULL || se non ci sono altri file.
+ *         NULL se iterator == NULL || non ci sono altri file.
  */
 struct fsp_file* fsp_files_hash_table_getNext(struct fsp_files_hash_table_iterator* iterator);
 
