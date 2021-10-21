@@ -56,10 +56,10 @@ static CLIENTS clients = NULL;
 static SFD_QUEUE sfd_queue = NULL;
 
 // Il file di log
-static int log_file;
+static int log_file = -1;
 
 // Pipe per la comunicazione dei sfd dai thread worker al thread master
-static int pfd[2];
+static int pfd[2] = {-1, -1};
 
 // Mutex
 // files_mutex viene usato per l'accesso alle strutture dati files e files_queue
@@ -116,6 +116,23 @@ static unsigned int active_workers = 0;
  *        assieme ai suoi elementi e chiude tutte le connessioni attive con i client.
  */
 static void freeAll(void);
+
+/**
+ * \brief Distrugge tutti i mutex (files_mutex, clients_mutex) e
+ *        tutte le variabili di condizione (sfd_queue_isNotEmpty, lock_cmd_isNotLocked).
+ */
+static void destroyAll(void);
+
+/**
+ * \brief Stampa nel file di log e su stdout il messaggio SERVER_PROCESS_TERMINATED e
+ *        chiude il file di log.
+ */
+static void closeLogFile(void);
+
+/**
+ * \brief Chiude la pipe pfd.
+ */
+static void closePipe(void);
 
 /**
  * \brief Libera file dalla memoria.
@@ -261,15 +278,22 @@ int main(int argc, const char* argv[]) {
     }
     printf("File di log %s aperto in scrittura.\n", config_file.log_file_name);
     
+    // Scrive nel file di log e su stdout
+    time_t t = time(NULL);
+    struct tm* current_time = localtime(&t);
+    char msg[128] = {0};
+    sprintf(msg, "%d:%d:%d SERVER_PROCESS_STARTED\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
+    write(log_file, msg, strlen(msg));
+    write(1, msg, strlen(msg));
+    
     // Inizializza le strutture dati
-    if(config_file.files_max_num)
     if((files = fsp_files_hash_table_new(FSP_FILES_HASH_TABLE_SIZE)) == NULL ||
        (files_queue = fsp_files_queue_new()) == NULL ||
        (clients = fsp_clients_hash_table_new(FSP_CLIENTS_HASH_TABLE_SIZE)) == NULL ||
        (sfd_queue = fsp_sfd_queue_new(config_file.max_conn)) == NULL) {
         fprintf(stderr, "Errore: memoria insufficiente.\n");
         freeAll();
-        close(log_file);
+        closeLogFile();
         return -1;
     }
     // Mutex
@@ -280,7 +304,7 @@ int main(int argc, const char* argv[]) {
         fprintf(stderr, "Errore: mutex non creato.\n");
         pthread_mutexattr_destroy(&mutex_attr);
         freeAll();
-        close(log_file);
+        closeLogFile();
         return -1;
     }
     pthread_mutexattr_destroy(&mutex_attr);
@@ -288,7 +312,7 @@ int main(int argc, const char* argv[]) {
         fprintf(stderr, "Errore: mutex non creato.\n");
         pthread_mutex_destroy(&files_mutex);
         freeAll();
-        close(log_file);
+        closeLogFile();
         return -1;
     }
     // Condition variables
@@ -297,7 +321,7 @@ int main(int argc, const char* argv[]) {
         pthread_mutex_destroy(&files_mutex);
         pthread_mutex_destroy(&clients_mutex);
         freeAll();
-        close(log_file);
+        closeLogFile();
         return -1;
     }
     if(pthread_cond_init(&lock_cmd_isNotLocked, NULL) != 0) {
@@ -306,18 +330,15 @@ int main(int argc, const char* argv[]) {
         pthread_mutex_destroy(&clients_mutex);
         pthread_cond_destroy(&sfd_queue_isNotEmpty);
         freeAll();
-        close(log_file);
+        closeLogFile();
         return -1;
     }
     // Pipe senza nome per la comunicazione tra i thread worker e il thread master
     if(pipe(pfd) != 0) {
         fprintf(stderr, "Errore: pipe non creata.\n");
-        pthread_mutex_destroy(&files_mutex);
-        pthread_mutex_destroy(&clients_mutex);
-        pthread_cond_destroy(&sfd_queue_isNotEmpty);
-        pthread_cond_destroy(&lock_cmd_isNotLocked);
+        destroyAll();
         freeAll();
-        close(log_file);
+        closeLogFile();
         return -1;
     }
     printf("Strutture dati inizializzate.\n");
@@ -333,14 +354,10 @@ int main(int argc, const char* argv[]) {
        sigaction(SIGQUIT, &sa, NULL) != 0 ||
        sigaction(SIGHUP, &sa, NULL) != 0) {
         perror(NULL);
-        pthread_mutex_destroy(&files_mutex);
-        pthread_mutex_destroy(&clients_mutex);
-        pthread_cond_destroy(&sfd_queue_isNotEmpty);
-        pthread_cond_destroy(&lock_cmd_isNotLocked);
+        destroyAll();
         freeAll();
-        close(pfd[0]);
-        close(pfd[1]);
-        close(log_file);
+        closePipe();
+        closeLogFile();
         return -1;
     }
     printf("Gestione dei segnali impostata.\n");
@@ -349,14 +366,10 @@ int main(int argc, const char* argv[]) {
     int sfd;
     if((sfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
         perror(NULL);
-        pthread_mutex_destroy(&files_mutex);
-        pthread_mutex_destroy(&clients_mutex);
-        pthread_cond_destroy(&sfd_queue_isNotEmpty);
-        pthread_cond_destroy(&lock_cmd_isNotLocked);
+        destroyAll();
         freeAll();
-        close(pfd[0]);
-        close(pfd[1]);
-        close(log_file);
+        closePipe();
+        closeLogFile();
         return -1;
     }
     printf("Socket di tipo SOCK_STREAM creato.\n");
@@ -366,30 +379,22 @@ int main(int argc, const char* argv[]) {
     strncpy(sockaddr.sun_path, config_file.socket_file_name, UNIX_PATH_MAX);
     if(bind(sfd, (struct sockaddr*) &sockaddr, sizeof(sockaddr)) == -1) {
         perror(NULL);
-        pthread_mutex_destroy(&files_mutex);
-        pthread_mutex_destroy(&clients_mutex);
-        pthread_cond_destroy(&sfd_queue_isNotEmpty);
-        pthread_cond_destroy(&lock_cmd_isNotLocked);
+        destroyAll();
         freeAll();
         close(sfd);
-        close(pfd[0]);
-        close(pfd[1]);
-        close(log_file);
+        closePipe();
+        closeLogFile();
         return -1;
     }
     printf("Nome %s assegnato al socket.\n", config_file.socket_file_name);
     // listen
     if(listen(sfd, SOMAXCONN) == -1) {
         perror(NULL);
-        pthread_mutex_destroy(&files_mutex);
-        pthread_mutex_destroy(&clients_mutex);
-        pthread_cond_destroy(&sfd_queue_isNotEmpty);
-        pthread_cond_destroy(&lock_cmd_isNotLocked);
+        destroyAll();
         freeAll();
         close(sfd);
-        close(pfd[0]);
-        close(pfd[1]);
-        close(log_file);
+        closePipe();
+        closeLogFile();
         return -1;
     }
     printf("Socket in ascolto.\n");
@@ -399,15 +404,11 @@ int main(int argc, const char* argv[]) {
     pthread_t* threads = NULL;
     if((threads = malloc(sizeof(pthread_t)*config_file.worker_threads_num)) == NULL) {
         fprintf(stderr, "Errore: memoria insufficiente.\n");
-        pthread_mutex_destroy(&files_mutex);
-        pthread_mutex_destroy(&clients_mutex);
-        pthread_cond_destroy(&sfd_queue_isNotEmpty);
-        pthread_cond_destroy(&lock_cmd_isNotLocked);
+        destroyAll();
         freeAll();
         close(sfd);
-        close(pfd[0]);
-        close(pfd[1]);
-        close(log_file);
+        closePipe();
+        closeLogFile();
         return -1;
     }
     for(int i = 0; i < config_file.worker_threads_num; i++) {
@@ -416,20 +417,17 @@ int main(int argc, const char* argv[]) {
             for(int j = 0; j <= i; j++) {
                 pthread_detach(threads[j]);
             }
-            pthread_mutex_destroy(&files_mutex);
-            pthread_mutex_destroy(&clients_mutex);
-            pthread_cond_destroy(&sfd_queue_isNotEmpty);
-            pthread_cond_destroy(&lock_cmd_isNotLocked);
+            destroyAll();
             freeAll();
             close(sfd);
-            close(pfd[0]);
-            close(pfd[1]);
+            closePipe();
             free(threads);
-            close(log_file);
+            closeLogFile();
             return -1;
         }
     }
     printf("Thread worker in esecuzione.\n");
+    fflush(stdout);
     
     // select
     int ready_descriptors_num;
@@ -464,16 +462,12 @@ int main(int argc, const char* argv[]) {
                 for(int i = 0; i < config_file.worker_threads_num; i++) {
                     pthread_detach(threads[i]);
                 }
-                pthread_mutex_destroy(&files_mutex);
-                pthread_mutex_destroy(&clients_mutex);
-                pthread_cond_destroy(&sfd_queue_isNotEmpty);
-                pthread_cond_destroy(&lock_cmd_isNotLocked);
+                destroyAll();
                 freeAll();
                 close(sfd);
-                close(pfd[0]);
-                close(pfd[1]);
+                closePipe();
                 free(threads);
-                close(log_file);
+                closeLogFile();
                 return -1;
             }
         } else {
@@ -512,10 +506,12 @@ int main(int argc, const char* argv[]) {
                             continue;
                         }
                         
-                        // Scrive nel file di log
-                        char msg[128] = {0};
-                        sprintf(msg, "CONNECTION_OPENED: %d\n", fd_c);
+                        // Scrive nel file di log e su stdout
+                        t = time(NULL);
+                        current_time = localtime(&t);
+                        sprintf(msg, "%d:%d:%d CONNECTION_OPENED: %d\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                         write(log_file, msg, strlen(msg));
+                        write(1, msg, strlen(msg));
                         
                         // Crea un nuovo client
                         CLIENT client = NULL;
@@ -523,9 +519,10 @@ int main(int argc, const char* argv[]) {
                             // Memoria insufficiente
                             close(fd_c);
                             
-                            // Scrive nel file di log
-                            sprintf(msg, "CONNECTION_CLOSED: %d (internal error)\n", fd_c);
+                            // Scrive nel file di log e su stdout
+                            sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (internal error)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                             write(log_file, msg, strlen(msg));
+                            write(1, msg, strlen(msg));
                             
                             continue;
                         }
@@ -545,17 +542,19 @@ int main(int argc, const char* argv[]) {
                             sendFspResp(client, 421, "Service not available, closing connection.", 0, NULL);
                             close(fd_c);
                             
-                            // Scrive nel file di log
-                            sprintf(msg, "CONNECTION_CLOSED: %d (service not available)\n", fd_c);
+                            // Scrive nel file di log e su stdout
+                            sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (service not available)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                             write(log_file, msg, strlen(msg));
+                            write(1, msg, strlen(msg));
                         } else {
                             // Invia il messaggio di risposta fsp con codice 220
                             if(sendFspResp(client, 220, "Service ready.", 0, NULL) != 0) {
                                 close(fd_c);
                                 
-                                // Scrive nel file di log
-                                sprintf(msg, "CONNECTION_CLOSED: %d (internal error)\n", fd_c);
+                                // Scrive nel file di log e su stdout
+                                sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (internal error)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                                 write(log_file, msg, strlen(msg));
+                                write(1, msg, strlen(msg));
                                 
                                 continue;
                             }
@@ -605,10 +604,7 @@ int main(int argc, const char* argv[]) {
     free(threads);
     printf("Esecuzione dei thread worker terminata.\n");
     
-    pthread_mutex_destroy(&files_mutex);
-    pthread_mutex_destroy(&clients_mutex);
-    pthread_cond_destroy(&sfd_queue_isNotEmpty);
-    pthread_cond_destroy(&lock_cmd_isNotLocked);
+    destroyAll();
     
     // Stampa il sunto delle operazioni
     printf("--------------------------------\n");
@@ -621,7 +617,7 @@ int main(int argc, const char* argv[]) {
     files = NULL;
     
     freeAll();
-    close(log_file);
+    closeLogFile();
     
     return 0;
 }
@@ -637,6 +633,30 @@ static void freeAll() {
         fsp_clients_hash_table_free(clients);
     }
     if(sfd_queue != NULL) fsp_sfd_queue_free(sfd_queue);
+}
+
+static void destroyAll() {
+    pthread_mutex_destroy(&files_mutex);
+    pthread_mutex_destroy(&clients_mutex);
+    pthread_cond_destroy(&sfd_queue_isNotEmpty);
+    pthread_cond_destroy(&lock_cmd_isNotLocked);
+}
+
+static void closeLogFile(void) {
+    if(log_file < 0) return;
+    
+    time_t t = time(NULL);
+    struct tm* current_time = localtime(&t);
+    char msg[128] = {0};
+    sprintf(msg, "%d:%d:%d SERVER_PROCESS_TERMINATED\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
+    write(log_file, msg, strlen(msg));
+    write(1, msg, strlen(msg));
+    close(log_file);
+}
+
+static void closePipe() {
+    if(pfd[0] >= 0) close(pfd[0]);
+    if(pfd[1] >= 0) close(pfd[1]);
 }
 
 static void removeFile(FSP_FILE file) {
@@ -690,15 +710,19 @@ static void closeConnection(CLIENT client, const char* error_descr) {
     }
     pthread_mutex_unlock(&files_mutex);
     
-    // Scrive nel file di log
+    // Scrive nel file di log e su stdout
+    time_t t = time(NULL);
+    struct tm* current_time = localtime(&t);
     const size_t msg_size = 256;
     char msg[msg_size] = {0};
     if(error_descr != NULL) {
-        snprintf(msg, msg_size, "CONNECTION_CLOSED: %d (%s)\n", client->sfd, error_descr);
+        sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (%s)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, client->sfd, error_descr);
         write(log_file, msg, strlen(msg));
+        write(1, msg, strlen(msg));
     } else {
-        sprintf(msg, "CONNECTION_CLOSED: %d\n", client->sfd);
+        sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, client->sfd);
         write(log_file, msg, strlen(msg));
+        write(1, msg, strlen(msg));
     }
     
     fsp_client_free(client);
@@ -791,11 +815,13 @@ static int parseConfigFile() {
 static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_request* req, int resp_code, unsigned long int bytes) {
     if(client == NULL || req == NULL) return;
     
+    time_t t = time(NULL);
+    struct tm* current_time = localtime(&t);
     const size_t msg_size = 512;
     const size_t arg_max_len = 256;
     char msg[msg_size] = {0};
     
-    sprintf(msg, "%d: %d", thread_id, client->sfd);
+    sprintf(msg, "%d:%d:%d %d: %d", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, thread_id, client->sfd);
     
     switch(req->cmd) {
         case APPEND:
@@ -882,8 +908,9 @@ static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_r
             break;
     }
     
-    // Scrive nel file di log
+    // Scrive nel file di log e su stdout
     write(log_file, msg, strlen(msg));
+    write(1, msg, strlen(msg));
 }
 
 static void* worker(void* arg) {
@@ -922,10 +949,13 @@ static void* worker(void* arg) {
             // Client non trovato
             close(sfd);
             
-            // Stampa nel file di log
+            // Scrive nel file di log e su stdout
+            time_t t = time(NULL);
+            struct tm* current_time = localtime(&t);
             char msg[64] = {0};
-            sprintf(msg, "CONNECTION_CLOSED: %d (client not found)\n", sfd);
+            sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (client not found)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, sfd);
             write(log_file, msg, strlen(msg));
+            write(1, msg, strlen(msg));
             
             continue;
         }
@@ -1170,10 +1200,12 @@ static int capacityMiss(void** data, size_t* data_len) {
     if(data_len != NULL) *data_len = wrote_bytes;
     
     // Messaggio per il file di log
+    time_t t = time(NULL);
+    struct tm* current_time = localtime(&t);
     size_t msg_size = 64 + n*512;
     // VLA
     char msg[msg_size];
-    sprintf(msg, "CAPACITY_MISS: %d (%lu)\n", n, prev_storage_size - storage_size);
+    sprintf(msg, "%d:%d:%d CAPACITY_MISS: %d (%lu)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, n, prev_storage_size - storage_size);
     // Rimuove i file
     for(int i = 0; i < n; i++) {
         file = fsp_files_queue_dequeue(files_queue);
@@ -1196,8 +1228,9 @@ static int capacityMiss(void** data, size_t* data_len) {
     capacity_misses++;
     pthread_mutex_unlock(&files_mutex);
     
-    // Scrive nel file di log
+    // Scrive nel file di log e su stdout
     write(log_file, msg, strlen(msg));
+    write(1, msg, strlen(msg));
     
     return 0;
 }
