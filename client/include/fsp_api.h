@@ -85,6 +85,9 @@ int closeConnection(const char* sockname);
  *         EBADMSG: se il messaggio di richiesta fsp contiene errori sintattici (codice di risposta fsp 501), o
  *                  li contiene il messaggio di risposta fsp (anche in caso di codice di risposta fsp non riconosciuto/inatteso).
  *         ENOENT: se non viene passato il flag O_CREATE e il file pathname non è presente sul server (codice di risposta fsp 550).
+ *         ENOMEM: se viene passato il flag O_CREATE e non c'è sufficiente memoria sul server per eseguire l'operazione (codice di risposta fsp 552).
+ *         EPERM: se viene passato il flag O_LOCK e al momento l'operazione non è consentita
+ *                in quanto un altro client detiene la lock (codice di risposta fsp 554).
  *         EEXIST: se viene passato il flag O_CREATE ed il file pathname esiste già memorizzato nel server (codice di risposta fsp 555).
  *         ECANCELED: se non è stato possibile eseguire l'operazione (codice di risposta fsp 556).
  */
@@ -132,7 +135,6 @@ int readFile(const char* pathname, void** buf, size_t* size);
  *         ECONNABORTED: se il servizio non è disponibile (codice di risposta fsp 421) e la connessione è stata chiusa.
  *         EBADMSG: se il messaggio di richiesta fsp contiene errori sintattici (codice di risposta fsp 501), o
  *                  li contiene il messaggio di risposta fsp (anche in caso di codice di risposta fsp non riconosciuto/inatteso).
- *         ECANCELED: se non è stato possibile eseguire l'operazione (codice di risposta fsp 556).
  */
 int readNFiles(int N, const char* dirname);
 
@@ -155,6 +157,7 @@ int readNFiles(int N, const char* dirname);
  *         ECONNABORTED: se il servizio non è disponibile (codice di risposta fsp 421) e la connessione è stata chiusa.
  *         EBADMSG: se il messaggio di richiesta fsp contiene errori sintattici (codice di risposta fsp 501), o
  *                  li contiene il messaggio di risposta fsp (anche in caso di codice di risposta fsp non riconosciuto/inatteso).
+ *         ENOENT: se il file pathname non è presente sul server (codice di risposta fsp 550).
  *         ENOMEM: se non c'è sufficiente memoria sul server per eseguire l'operazione (codice di risposta fsp 552).
  *         EPERM: se l'operazione non è consentita (codice di risposta fsp 554).
  *         ECANCELED: se non è stato possibile eseguire l'operazione (codice di risposta fsp 556).
@@ -225,6 +228,7 @@ int lockFile(const char* pathname);
  *         EBADMSG: se il messaggio di richiesta fsp contiene errori sintattici (codice di risposta fsp 501), o
  *                  li contiene il messaggio di risposta fsp (anche in caso di codice di risposta fsp non riconosciuto/inatteso).
  *         ENOENT: se il file pathname non è presente sul server (codice di risposta fsp 550).
+ *         EPERM: se l'operazione non è consentita (codice di risposta fsp 554).
  *         ECANCELED: se non è stato possibile eseguire l'operazione (codice di risposta fsp 556).
  */
 int unlockFile(const char* pathname);

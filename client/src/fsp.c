@@ -544,6 +544,10 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                             // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
                             fprintf(stderr, "Errore writeFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
                             break;
+                        case ENOENT:
+                            // Se il file pathname non è presente sul server
+                            fprintf(stderr, "Errore writeFile: il file %s non è presente sul server.\n", filename);
+                            break;
                         case ENOMEM:
                             // Se non c'è sufficiente memoria sul server per eseguire l'operazione
                             fprintf(stderr, "Errore writeFile: memoria sul server insufficiente per scrivere il file %s.\n", filename);
@@ -668,6 +672,10 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
                 case EBADMSG:
                     // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
                     fprintf(stderr, "Errore writeFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
+                    break;
+                case ENOENT:
+                    // Se il file pathname non è presente sul server
+                    fprintf(stderr, "Errore writeFile: il file %s non è presente sul server.\n", filename);
                     break;
                 case ENOMEM:
                     // Se non c'è sufficiente memoria sul server per eseguire l'operazione
@@ -914,10 +922,6 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
                 // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
                 fprintf(stderr, "Errore readNFiles: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
                 break;
-            case ECANCELED:
-                // Se non è stato possibile eseguire l'operazione
-                fprintf(stderr, "Errore readNFiles: non è stato possibile eseguire l'operazione.\n");
-                break;
             default:
                 break;
         }
@@ -1060,6 +1064,10 @@ static void unlock_opt(char* arg, unsigned int time, int p) {
                 case ENOENT:
                     // Se il file pathname non è presente sul server
                     fprintf(stderr, "Errore unlockFile: il file %s non è presente sul server.\n", file);
+                    break;
+                case EPERM:
+                    // Se l'operazione non è consentita
+                    fprintf(stderr, "Errore unlockFile: operazione non consentita sul file %s.\n", file);
                     break;
                 case ECANCELED:
                     // Se non è stato possibile eseguire l'operazione
@@ -1214,6 +1222,14 @@ static int open_file(char* pathname, int flags) {
             case ENOENT:
                 // Se non viene passato il flag O_CREATE e il file pathname non è presente sul server
                 fprintf(stderr, "Errore openFile: non è stato passato il flag O_CREATE, ma il file %s non è presente sul server.\n", pathname);
+                break;
+            case ENOMEM:
+                // Se non c'è sufficiente memoria sul server per eseguire l'operazione
+                fprintf(stderr, "Errore openFile: memoria sul server insufficiente per creare il file %s.\n", pathname);
+                break;
+            case EPERM:
+                // Se l'operazione non è consentita
+                fprintf(stderr, "Errore openFile: operazione non consentita sul file %s.\n", pathname);
                 break;
             case EEXIST:
                 // Se viene passato il flag O_CREATE ed il file pathname esiste già memorizzato nel server

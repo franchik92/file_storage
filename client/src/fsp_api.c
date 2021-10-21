@@ -177,7 +177,6 @@ int openFile(const char* pathname, int flags) {
     
     struct fsp_response resp;
     if(receiveFspResp(&resp) != 0) {
-        if(errno == ENOMEM || errno == EPERM) errno = EBADMSG;
         return -1;
     }
     if(resp.code != 200) {
@@ -273,7 +272,7 @@ int readNFiles(int N, const char* dirname) {
     }
     struct fsp_response resp;
     if(receiveFspResp(&resp) != 0) {
-        if(errno == ENOENT || errno == ENOMEM || errno == EPERM || errno == EEXIST) errno = EBADMSG;
+        if(errno == ENOENT || errno == ENOMEM || errno == EPERM || errno == EEXIST || errno == ECANCELED) errno = EBADMSG;
         return -1;
     }
     if(resp.code != 200) {
@@ -370,7 +369,7 @@ int writeFile(const char* pathname, const char* dirname) {
     
     struct fsp_response resp;
     if(receiveFspResp(&resp) != 0) {
-        if(errno == ENOENT || errno == EEXIST) errno = EBADMSG;
+        if(errno == EEXIST) errno = EBADMSG;
         return -1;
     }
     if(resp.code != 200) {
@@ -487,7 +486,7 @@ int unlockFile(const char* pathname) {
     
     struct fsp_response resp;
     if(receiveFspResp(&resp) != 0) {
-        if(errno == ENOMEM || errno == EEXIST || errno == EPERM) errno = EBADMSG;
+        if(errno == ENOMEM || errno == EEXIST) errno = EBADMSG;
         return -1;
     }
     if(resp.code != 200) {
