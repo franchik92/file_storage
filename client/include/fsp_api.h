@@ -1,19 +1,19 @@
 /*
  * Autore: Francesco Gallicchio
  * Matricola: 579131
- *
- * API messa a disposizione per i client che intendono connettersi
- * a un file storage server mediante il protocollo FSP (File Storage Protocol).
- *
- * È necessario aprire la connessione con la funzione openConnection prima
- * di invocare una qualsiasi altra funzione.
- * Una volta aperta la connessione con successo, fa uso di un buffer per la generazione e la
- * ricezione dei messaggi fsp.
- * Non può essere aperta più di una connessione contemporaneamente.
- * I nomi dei file sul server sono salvati con il loro path assoluto (iniziano con il carattere '/').
- * Qualsiasi scrittura in memoria secondaria di un file prelevato dal server avviene modificando il suo nome nel modo seguente:
- * il primo carattere '/' viene omesso e qualsiasi altro carattere '/' viene sostituito con '_'.
  */
+
+// API messa a disposizione per i client che intendono connettersi
+// a un file storage server mediante il protocollo FSP (File Storage Protocol).
+
+// È necessario aprire la connessione con la funzione openConnection prima
+// di invocare una qualsiasi altra funzione.
+// Una volta aperta la connessione con successo, fa uso di un buffer per la generazione e la
+// ricezione dei messaggi fsp.
+// Non può essere aperta più di una connessione contemporaneamente.
+// I nomi dei file sul server sono salvati con il loro path assoluto (iniziano con il carattere '/').
+// Qualsiasi scrittura in memoria secondaria di un file prelevato dal server avviene modificando il suo nome nel modo seguente:
+// il primo carattere '/' viene omesso e qualsiasi altro carattere '/' viene sostituito con '_'.
 
 #ifndef FSP_API_H
 #define FSP_API_H

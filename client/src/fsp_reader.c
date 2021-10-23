@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 #include <fsp_reader.h>
 
 #include <stdlib.h>

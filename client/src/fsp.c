@@ -1,6 +1,11 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 #include <fsp_api.h>
 #include <fsp_client_request_queue.h>
-#include <fsp_opened_files_bst.h>
+#include <fsp_opened_files_hash_table.h>
 #include <utils.h>
 
 #include <stdio.h>
@@ -14,37 +19,41 @@
 
 #define FSP_CLIENT_FILE_MAX_LEN 256
 
+// Dimensione della tabella hash per i file aperti
+#define FSP_OPENED_FILES_HASH_TABLE_SIZE 97
+
 // Ogni richiesta Request viene inserita in una coda RequestQueue
 typedef struct fsp_client_request Request;
 typedef struct fsp_client_request_queue RequestQueue;
 
-// Tiene traccia dei file aperti in un albero binario di ricerca
-typedef struct opened_file OpenedFiles;
+// Tiene traccia dei file aperti in una tabella hash
+typedef struct fsp_opened_file OpenedFile;
+typedef struct fsp_opened_files_hash_table OpenedFiles;
 
 // Funzioni che eseguono le richieste del client
 static void printUsage(void);
 // Restituisce -1 se non è stato possibile aggiungere un file appena aperto nell'albero binario di ricerca,
 // -2 se non riesce a tornare alla working directory precedente alla sua chiamata,
 // 0 altrimenti.
-static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles** files);
+static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
 // Restituisce -1 se non è stato possibile aggiungere un file appena aperto nell'albero binario di ricerca,
 // 0 altrimenti.
-static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, OpenedFiles** files);
+static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
 // 0 altrimenti.
-static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles** files);
+static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
 // -2 se non è stato possibile allocare memoria,
 // 0 altrimenti.
-static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles** files);
+static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
 static void Read_opt(char* arg, char* dirname, unsigned int time, int p);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
 // 0 altrimenti.
-static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles** files);
+static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_files);
 static void unlock_opt(char* arg, unsigned int time, int p);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
 // 0 altrimenti.
-static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles** files);
+static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_files);
 
 // Funzioni per l'apertura e la chiusura dei file.
 // Viene fatta richiesta automatica di apertura di un file
@@ -62,7 +71,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles** files);
 // Restituisce 0 in caso di successo,
 //             -1 se non riesce ad aprire il file
 // (pathname è il path assoluto del file da aprire)
-static int open_file(char* pathname, int flags);
+static int open_file(const char* pathname, int flags);
 static void close_file(const char* pathname);
 
 int main(int argc, char* argv[]) {
@@ -70,7 +79,7 @@ int main(int argc, char* argv[]) {
     int p = 0;
     RequestQueue queue = {NULL, NULL};
     Request* req = NULL;
-    OpenedFiles* files = NULL;
+    OpenedFiles* opened_files = NULL;
     
     if(argc == 2 && strcmp(argv[1], "-h") == 0) {
         printUsage();
@@ -202,6 +211,12 @@ int main(int argc, char* argv[]) {
     }
     if(p) printf("Connessione aperta.\n\n");
     
+    // Alloca memoria per la tabella hash che conterrà i nomi dei file aperti dal client
+    if((opened_files = fsp_opened_files_hash_table_new(FSP_OPENED_FILES_HASH_TABLE_SIZE)) == NULL) {
+        fprintf(stderr, "Errore: memoria insufficiente per allocare la tabella hash\n");
+        return -1;
+    }
+    
     // Esegue le richieste
     while((req = fsp_client_request_queue_dequeue(&queue)) != NULL) {
         long int time = -1;
@@ -223,7 +238,7 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                switch (res = write_opt(req->arg, req->dirname, (unsigned int) time, p, &files)) {
+                switch (res = write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
                     case -1:
                         fprintf(stderr, "Errore richiesta -w: impossibile aggiornare l'albero di ricerca.\n");
                         break;
@@ -242,7 +257,7 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                res = Write_opt(req->arg, req->dirname, (unsigned int) time, p, &files);
+                res = Write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files);
                 if(res != 0) fprintf(stderr, "Errore richiesta -W: impossibile aggiornare l'albero di ricerca.\n");
                 break;
             case 'r':
@@ -252,7 +267,7 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                switch (res = read_opt(req->arg, req->dirname, (unsigned int) time, p, &files)) {
+                switch (res = read_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
                     case -1:
                         fprintf(stderr, "Errore richiesta -r: impossibile aggiornare l'albero di ricerca.\n");
                         break;
@@ -277,7 +292,7 @@ int main(int argc, char* argv[]) {
                 if(p) printf("-l %s", req->arg);
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
-                res = lock_opt(req->arg, (unsigned int) time, p, &files);
+                res = lock_opt(req->arg, (unsigned int) time, p, opened_files);
                 if(res != 0) fprintf(stderr, "Errore richiesta -l: impossibile aggiornare l'albero di ricerca.\n");
                 break;
             case 'u':
@@ -290,7 +305,7 @@ int main(int argc, char* argv[]) {
                 if(p) printf("-c %s", req->arg);
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
-                res = cancel_opt(req->arg, (unsigned int) time, p, &files);
+                res = cancel_opt(req->arg, (unsigned int) time, p, opened_files);
                 if(res != 0) fprintf(stderr, "Errore richiesta -c: impossibile aggiornare l'albero di ricerca.\n");
                 break;
             default:
@@ -303,7 +318,8 @@ int main(int argc, char* argv[]) {
         if(res != 0) {
             fsp_client_request_queue_freeRequest(req);
             fsp_client_request_queue_freeAllRequests(&queue);
-            fsp_opened_files_bst_deleteAll(files, close_file);
+            fsp_opened_files_hash_table_deleteAll(opened_files, close_file);
+            fsp_opened_files_hash_table_free(opened_files);
             closeConnection(socket_filename);
             return -1;
         }
@@ -311,7 +327,8 @@ int main(int argc, char* argv[]) {
     }
     
     // Chiude tutti i file rimasti aperti
-    fsp_opened_files_bst_deleteAll(files, close_file);
+    fsp_opened_files_hash_table_deleteAll(opened_files, close_file);
+    fsp_opened_files_hash_table_free(opened_files);
     
     // Chiude la connessione
     if(p) printf("Chiusura della connessione in corso...\n");
@@ -367,7 +384,7 @@ static void printUsage() {
     printf("\tcancel_req := -c file_1[,file_2,...] [-t time]\n");
 }
 
-static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles** files) {
+static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files) {
     time = time/1000;
     char* dir_arg = arg;
     char* n_arg = NULL;
@@ -433,7 +450,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         return 0;
     }
     
-    if(write_opt_rec(&n, dirname, time, p, files) != 0) return -1;
+    if(write_opt_rec(&n, dirname, time, p, opened_files) != 0) return -1;
     
     if(chdir(current_dir) != 0) {
         // Errore: impossibile tornare alla working directory precedente
@@ -443,7 +460,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
     return 0;
 }
 
-static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, OpenedFiles** files) {
+static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, OpenedFiles* opened_files) {
     if(*n == 0) {
         return 0;
     }
@@ -479,7 +496,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                     continue;
                 }
                 
-                if(write_opt_rec(n, dirname, time, p, files) != 0) return -1;
+                if(write_opt_rec(n, dirname, time, p, opened_files) != 0) return -1;
                 
                 if(chdir(current_dir) != 0) {
                     // Errore: impossibile tornare alla working directory precedente
@@ -504,16 +521,16 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                 }
                 
                 // Controlla se il file è già stato aperto
-                struct opened_file* o_file = fsp_opened_files_bst_search(*files, filename);
-                if(o_file != NULL) {
+                OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
+                if(opened_file != NULL) {
                     // Chiude il file
-                    close_file(filename);
-                    fsp_opened_files_bst_delete(files, filename);
+                    close_file(opened_file->filename);
+                    fsp_opened_files_hash_table_delete(opened_files, filename);
                 }
                 // Apre il file
                 if(open_file(filename, O_CREATE | O_LOCK) != 0) continue;
-                // Aggiunge il file all'albero binario di ricerca
-                if(fsp_opened_files_bst_insert(files, filename, O_CREATE | O_LOCK) != 0) {
+                // Aggiunge il file nella tabella hash
+                if(fsp_opened_files_hash_table_insert(opened_files, filename, O_CREATE | O_LOCK) != 0) {
                     close_file(filename);
                     return -1;
                 }
@@ -578,7 +595,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                 
                 // Chiude il file
                 close_file(filename);
-                fsp_opened_files_bst_delete(files, filename);
+                fsp_opened_files_hash_table_delete(opened_files, filename);
                 // Aggiorna n
                 (*n)--;
                 // Attende time secondi prima di eseguire la prossima operazione
@@ -599,7 +616,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
     return 0;
 }
 
-static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles** files) {
+static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files) {
     time = time/1000;
     char* file = NULL;
     char filename[FSP_CLIENT_FILE_MAX_LEN];
@@ -629,11 +646,11 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         }
         
         // Controlla se il file è già stato aperto
-        struct opened_file* o_file = fsp_opened_files_bst_search(*files, filename);
-        if(o_file != NULL) {
+        OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
+        if(opened_file != NULL) {
             // Chiude il file
             close_file(filename);
-            fsp_opened_files_bst_delete(files, filename);
+            fsp_opened_files_hash_table_delete(opened_files, filename);
         }
         // Apre il file
         if(open_file(filename, O_CREATE | O_LOCK) != 0) {
@@ -641,8 +658,8 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
             if((file = strtok(NULL, ",")) != NULL) continue;
             return 0;
         }
-        // Aggiunge il file all'albero binario di ricerca
-        if(fsp_opened_files_bst_insert(files, filename, O_CREATE | O_LOCK) != 0) {
+        // Aggiunge il file nella tabella hash
+        if(fsp_opened_files_hash_table_insert(opened_files, filename, O_CREATE | O_LOCK) != 0) {
             close_file(filename);
             return -1;
         }
@@ -707,7 +724,7 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         
         // Chiude il file
         close_file(filename);
-        fsp_opened_files_bst_delete(files, filename);
+        fsp_opened_files_hash_table_delete(opened_files, filename);
         
         // Attende time secondi prima di eseguire la prossima operazione
         sleep(time);
@@ -716,7 +733,7 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
     return 0;
 }
 
-static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles** files) {
+static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* files) {
     time = time/1000;
     char* file = NULL;
     char* buf = NULL;
@@ -727,8 +744,8 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
     
     do {
         // Controlla se il file è già stato aperto
-        struct opened_file* o_file = fsp_opened_files_bst_search(*files, file);
-        if(o_file == NULL) {
+        OpenedFile* opened_file = fsp_opened_files_hash_table_search(files, file);
+        if(opened_file == NULL) {
             // Il file non è ancora stato aperto
             // Apre il file
             if(open_file(file, O_DEFAULT) != 0) {
@@ -737,7 +754,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
                 return 0;
             }
             // Aggiunge il file all'albero binario di ricerca
-            if(fsp_opened_files_bst_insert(files, file, O_DEFAULT) != 0) {
+            if(fsp_opened_files_hash_table_insert(files, file, O_DEFAULT) != 0) {
                 close_file(file);
                 return -1;
             }
@@ -942,7 +959,7 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
     sleep(time);
 }
 
-static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles** files) {
+static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
     time = time/1000;
     char* file = NULL;
     int result;
@@ -951,8 +968,8 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles** files) {
     
     do {
         // Controlla se il file è già stato aperto
-        struct opened_file* o_file = fsp_opened_files_bst_search(*files, file);
-        if(o_file == NULL) {
+        OpenedFile* opened_file = fsp_opened_files_hash_table_search(files, file);
+        if(opened_file == NULL) {
             // Il file non è ancora stato aperto
             // Apre il file
             if(open_file(file, O_LOCK) != 0) {
@@ -960,8 +977,8 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles** files) {
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
             }
-            // Aggiunge il file all'albero binario di ricerca
-            if(fsp_opened_files_bst_insert(files, file, O_LOCK) != 0) {
+            // Aggiunge il file nella tabella hash
+            if(fsp_opened_files_hash_table_insert(files, file, O_LOCK) != 0) {
                 close_file(file);
                 return -1;
             }
@@ -1094,7 +1111,7 @@ static void unlock_opt(char* arg, unsigned int time, int p) {
     } while((file = strtok(NULL, ",")) != NULL);
 }
 
-static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles** files) {
+static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
     time = time/1000;
     char* file = NULL;
     int result;
@@ -1103,24 +1120,24 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles** files) 
     
     do {
         // Controlla se il file è già stato aperto
-        struct opened_file* o_file = fsp_opened_files_bst_search(*files, file);
-        if(o_file != NULL && o_file->flags != O_LOCK && o_file->flags != (O_CREATE | O_LOCK)) {
+        OpenedFile* opened_file = fsp_opened_files_hash_table_search(files, file);
+        if(opened_file != NULL && opened_file->flags != O_LOCK && opened_file->flags != (O_CREATE | O_LOCK)) {
             // Il file è già stato aperto e non ha il flag O_LOCK settato
             // Chiude il file
             close_file(file);
-            fsp_opened_files_bst_delete(files, file);
-            o_file = NULL;
+            fsp_opened_files_hash_table_delete(files, file);
+            opened_file = NULL;
         }
         // Controlla se il file è ancora aperto o è stato appena chiuso
-        if(o_file == NULL) {
+        if(opened_file == NULL) {
             // Apre il file
             if(open_file(file, O_LOCK) != 0) {
                 if(p) printf("Non è stato possibile rimuovere dal server il file %s (apertura con flag O_LOCK non riuscita).\n", file);
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
             }
-            // Aggiunge il file all'albero binario di ricerca
-            if(fsp_opened_files_bst_insert(files, file, O_LOCK) != 0) {
+            // Aggiunge il file nella tabella hash
+            if(fsp_opened_files_hash_table_insert(files, file, O_LOCK) != 0) {
                 close_file(file);
                 return -1;
             }
@@ -1183,7 +1200,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles** files) 
         
         // Chiude il file
         close_file(file);
-        fsp_opened_files_bst_delete(files, file);
+        fsp_opened_files_hash_table_delete(files, file);
         
         // Attende time secondi prima di eseguire la prossima operazione
         sleep(time);
@@ -1192,7 +1209,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles** files) 
     return 0;
 }
 
-static int open_file(char* pathname, int flags) {
+static int open_file(const char* pathname, int flags) {
     if(openFile(pathname, flags) != 0) {
         switch(errno) {
             case EINVAL:
@@ -1249,6 +1266,8 @@ static int open_file(char* pathname, int flags) {
 }
 
 static void close_file(const char* pathname) {
+    if(pathname == NULL) return;
+    
     if(closeFile(pathname) != 0) {
         switch(errno) {
             case EINVAL:

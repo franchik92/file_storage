@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>

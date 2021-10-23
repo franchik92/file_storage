@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 // Lista contenente i file.
 // Struttura dati che tiene traccia dei file aperti da ogni client.
 // La lista è ordinata lessicograficamente in ordine crescente dei nomi dei file.

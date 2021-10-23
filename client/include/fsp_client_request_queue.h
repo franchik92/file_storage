@@ -1,7 +1,11 @@
 /*
- * Ogni richiesta del client viene salvata in una struttura fsp_client_request e
- * in seguito aggiunta ad una coda definita dalla struttura fsp_client_request_queue
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
  */
+
+// Ogni richiesta del client viene salvata in una struttura fsp_client_request e
+// in seguito aggiunta ad una coda definita dalla struttura fsp_client_request_queue.
+
 #ifndef FSP_CLIENT_REQUEST_QUEUE_H
 #define FSP_CLIENT_REQUEST_QUEUE_H
 

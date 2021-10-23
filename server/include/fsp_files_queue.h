@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 // Coda FIFO contenente i file.
 // Struttura dati che tiene traccia dell'ordine cronologico con il quale i file vengono salvati sul server.
 

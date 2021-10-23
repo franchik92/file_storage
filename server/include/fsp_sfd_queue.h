@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 // Coda FIFO contenente i socket file descriptor.
 // Struttura dati usata per comunicare i socket file descriptor ai thread worker.
 

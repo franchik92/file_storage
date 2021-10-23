@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 // Tabella hash contenente i client.
 // Struttura dati che contiene le informazioni sui client connessi al server.
 // Le collisioni vengono risolte mediante concatenamento.
@@ -50,7 +55,7 @@ int fsp_clients_hash_table_insert(struct fsp_clients_hash_table* hash_table, str
 struct fsp_client* fsp_clients_hash_table_search(const struct fsp_clients_hash_table* hash_table, int sfd);
 
 /**
- * \brief Rimuove il client con chiave sfd dalla tabella e lo restituisce.
+ * \brief Rimuove il client con chiave sfd dalla tabella hash_table e lo restituisce.
  *
  * \return Il client rimosso,
  *         NULL se hash_table == NULL || client non trovato.

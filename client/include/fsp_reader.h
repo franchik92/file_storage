@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 #ifndef FSP_READER_H
 #define FSP_READER_H
 

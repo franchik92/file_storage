@@ -1,3 +1,8 @@
+/*
+ * Autore: Francesco Gallicchio
+ * Matricola: 579131
+ */
+
 // Tabella hash contenente i file.
 // Struttura dati usata per mantenere in memoria tutti i file salvati sul server.
 // Le collisioni vengono risolte mediante concatenamento.
