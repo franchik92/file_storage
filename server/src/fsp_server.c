@@ -32,7 +32,7 @@
 #endif
 
 // Nome del file di configurazione
-#define CONFIG_FILE "./config.txt"
+#define CONFIG_FILE "/Users/francesco/Desktop/test/config.txt"
 // Dimensione di defualt dei buffer usati dai client (4MB)
 #define FSP_CLIENT_DEF_BUF_SIZE 4194304
 // Dimensioni delle tabelle hash
@@ -446,8 +446,8 @@ int main(int argc, const char* argv[]) {
     int fd_max = 0;
     if(pfd[0] > fd_max) fd_max = pfd[0];
     if(sfd > fd_max) fd_max = sfd;
-    int break_loop = 0;
-    while(break_loop) {
+    int loop = 1;
+    while(loop) {
         rdset = set;
         if((ready_descriptors_num = select(fd_max+1, &rdset, NULL, NULL, &timeout)) == -1) {
             if(errno == EINTR) {
@@ -488,7 +488,7 @@ int main(int argc, const char* argv[]) {
                 pthread_mutex_unlock(&clients_mutex);
                 continue;
             }
-            for(int fd = 0; fd < fd_max; fd++) {
+            for(int fd = 0; fd <= fd_max; fd++) {
                 if(FD_ISSET(fd, &rdset)) {
                     if(fd == sfd) {
                         if(quit || !accept_connections) {
@@ -506,11 +506,10 @@ int main(int argc, const char* argv[]) {
                         
                         // Accetta una nuova connessione
                         int fd_c;
-                        if((fd_c = accept(sfd, NULL, 0)) != -1) {
+                        if((fd_c = accept(sfd, NULL, 0)) == -1) {
                             perror(NULL);
                             continue;
                         }
-                        
                         // Scrive nel file di log e su stdout
                         t = time(NULL);
                         current_time = localtime(&t);
@@ -575,7 +574,7 @@ int main(int argc, const char* argv[]) {
                             // Termina l'esecuzione
                             close(pfd[0]);
                             close(sfd);
-                            break_loop = 1;
+                            loop = 0;
                             break;
                         } else {
                             FD_SET(fd_c, &set);
@@ -755,10 +754,11 @@ static int parseConfigFile() {
     while(fgets(buf, buf_size, file) != NULL) {
         char* param_start = buf;
         char* end = param_start;
-        while(*end != '\0' || *end != '=') end++;
+        while(*end != '\0' && *end != '=') end++;
         if(*end == '\0') {
             // Errore di sintassi
             fclose(file);
+            printf("errore qui\n");
             return -2;
         }
         *end = '\0';
@@ -766,7 +766,7 @@ static int parseConfigFile() {
         
         char* val_start = end;
         
-        while(*end != '\0' || *end != '\n') end++;
+        while(*end != '\0' && *end != '\n') end++;
         if(*end == '\0') {
             // Errore di sintassi
             fclose(file);
@@ -791,7 +791,8 @@ static int parseConfigFile() {
                 fclose(file);
                 return -2;
             }
-            config_file.storage_max_size = (unsigned long int) val;
+            // Converte da MByte a Byte (1 MByte = 1048576 Byte)
+            config_file.storage_max_size = (unsigned int) val*1048576;
         } else if(strcmp("MAX_CONN", param_start) == 0) {
             if(!isNumber(val_start, &val) || val < 0) {
                 // Errore di sintassi
@@ -814,6 +815,7 @@ static int parseConfigFile() {
     }
     
     fclose(file);
+    
     return 0;
 }
 
@@ -920,7 +922,7 @@ static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_r
 
 static void* worker(void* arg) {
     // thread ID
-    int thread_id = (int) *((unsigned long int*) arg);
+    int thread_id = (int) ((unsigned long int) arg);
     // Maschera i segnali
     sigset_t mask;
     sigfillset(&mask);
@@ -1054,7 +1056,7 @@ static void* worker(void* arg) {
                     // Mai eseguito
                     break;
             }
-            if(ret_val != 0) {
+            if(ret_val == -1) {
                 // Chiude immediatamente la connessione
                 closeConnection(client, "internal error");
                 continue;
@@ -1179,7 +1181,7 @@ static int capacityMiss(void** data, size_t* data_len) {
     long int wrote_bytes_tot = 0;
     long int wrote_bytes = 0;
     file = files_queue->head;
-    wrote_bytes = fsp_parser_makeData(*data, &tot_size, 0, n, file->pathname, file->size, file->data);
+    wrote_bytes = fsp_parser_makeData(data, &tot_size, 0, n, file->pathname, file->size, file->data);
     if(wrote_bytes < 0) {
         files_num += n;
         storage_size = prev_storage_size;
@@ -1280,7 +1282,7 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
     
     FSP_FILE file;
     int notOpened = 0;
-    int notLocked = 0;
+    int locked = 0;
     int noMemory = 0;
     
     pthread_mutex_lock(&files_mutex);
@@ -1292,7 +1294,7 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
         if(file->size + parsed_data.sizes[0] <= config_file.storage_max_size) {
             if(fsp_files_list_contains(client->openedFiles, req->arg) && file->data != NULL) {
                 // Il file è stato aperto dal client senza flag O_CREATE
-                if(file->locked >= 0 && file->locked == client->sfd) {
+                if(file->locked < 0 || file->locked == client->sfd) {
                     // Il client detiene la lock sul file
                     void* _data = file->data;
                     if((file->data = realloc(file->data, file->size + parsed_data.sizes[0])) == NULL) {
@@ -1324,7 +1326,7 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
                     // Aggiorna la statistica
                     if(storage_size > storage_max_reached_size) storage_max_reached_size = storage_size;
                 } else  {
-                    notLocked = 1;
+                    locked = 1;
                 }
             } else {
                 notOpened = 1;
@@ -1358,8 +1360,8 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(notLocked) {
-        // Il client non detiene la lock sul file
+    if(locked) {
+        // Un altro client detiene la lock sul file
         resp->code = 554;
         strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
@@ -1771,7 +1773,7 @@ static unsigned long int read_cmd(CLIENT client, const struct fsp_request* req, 
                     return -1;
                 }
                 long int wrote_bytes = 0;
-                wrote_bytes = fsp_parser_makeData(resp->data, &buf_size, 0, 1, file->pathname, file->size, file->data);
+                wrote_bytes = fsp_parser_makeData(&(resp->data), &buf_size, 0, 1, file->pathname, file->size, file->data);
                 if(wrote_bytes < 0) {
                     free(resp->data);
                     pthread_mutex_unlock(&files_mutex);
@@ -1873,7 +1875,7 @@ static unsigned long int readn_cmd(CLIENT client, const struct fsp_request* req,
         long int wrote_bytes = 0;
         long int wrote_bytes_tot = 0;
         
-        wrote_bytes_tot = fsp_parser_makeData(resp->data, &buf_size, 0, availableFiles, file->pathname, file->size, file->data);
+        wrote_bytes_tot = fsp_parser_makeData(&(resp->data), &buf_size, 0, availableFiles, file->pathname, file->size, file->data);
         if(wrote_bytes_tot < 0) {
             free(resp->data);
             resp->data = NULL;
@@ -1886,7 +1888,7 @@ static unsigned long int readn_cmd(CLIENT client, const struct fsp_request* req,
             // Non legge i file da rimuovere e i file in stato locked di cui il client non detiene la lock
             if(file->remove || (file->locked >=0 && file->locked != client->sfd)) continue;
             
-            wrote_bytes = fsp_parser_makeData(resp->data, &buf_size, wrote_bytes_tot, 0, file->pathname, file->size, file->data);
+            wrote_bytes = fsp_parser_makeData(&(resp->data), &buf_size, wrote_bytes_tot, 0, file->pathname, file->size, file->data);
             if(wrote_bytes < 0) {
                 free(resp->data);
                 resp->data = NULL;

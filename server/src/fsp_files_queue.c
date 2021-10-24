@@ -58,7 +58,7 @@ struct fsp_file* fsp_files_queue_remove(struct fsp_files_queue* queue, const cha
     
     struct fsp_file* _file = queue->head;
     struct fsp_file* _file_prev = NULL;
-    while(_file != NULL || strcmp(_file->pathname, pathname) != 0) {
+    while(_file != NULL && strcmp(_file->pathname, pathname) != 0) {
         _file_prev = _file;
         _file = _file->queue_next;
     }

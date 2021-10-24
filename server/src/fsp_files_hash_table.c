@@ -38,6 +38,9 @@ struct fsp_files_hash_table* fsp_files_hash_table_new(size_t size) {
         return NULL;
     }
     
+    for(int i = 0; i < size; i++) {
+        (hash_table->table)[i] = NULL;
+    }
     hash_table->size = size;
     hash_table->files_num = 0;
     
@@ -63,7 +66,7 @@ int fsp_files_hash_table_insert(struct fsp_files_hash_table* hash_table, struct 
         return -2;
     } else {
         struct fsp_file* _file_prev = NULL;
-        while(_file != NULL || (cmp = strcmp(_file->pathname, file->pathname)) < 0) {
+        while(_file != NULL && (cmp = strcmp(_file->pathname, file->pathname)) < 0) {
             _file_prev = _file;
             _file = _file->hash_table_next;
         }
@@ -88,8 +91,8 @@ struct fsp_file* fsp_files_hash_table_search(const struct fsp_files_hash_table* 
     unsigned long int index = hash_function(hash_table->size, pathname);
     struct fsp_file* _file = (hash_table->table)[index];
     
-    int cmp;
-    while(_file != NULL || (cmp = strcmp(_file->pathname, pathname)) < 0) {
+    int cmp = -1;
+    while(_file != NULL && (cmp = strcmp(_file->pathname, pathname)) < 0) {
         _file = _file->hash_table_next;
     }
     if(_file == NULL || cmp != 0) return NULL;
@@ -102,9 +105,9 @@ struct fsp_file* fsp_files_hash_table_delete(struct fsp_files_hash_table* hash_t
     unsigned long int index = hash_function(hash_table->size, pathname);
     struct fsp_file* _file = (hash_table->table)[index];
     
-    int cmp;
+    int cmp = -1;
     struct fsp_file* _file_prev = NULL;
-    while(_file != NULL || (cmp = strcmp(_file->pathname, pathname)) < 0) {
+    while(_file != NULL && (cmp = strcmp(_file->pathname, pathname)) < 0) {
         _file_prev = _file;
         _file = _file->hash_table_next;
     }

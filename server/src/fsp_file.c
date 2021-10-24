@@ -21,9 +21,10 @@ struct fsp_file* fsp_file_new(const char* pathname, const void* data, size_t siz
     }
     
     pathname == NULL ? file->pathname = NULL : strcpy(file->pathname, pathname);
-    file->data == NULL ? file->data = NULL : memcpy(file->data, data, size);
+    data == NULL ? file->data = NULL : memcpy(file->data, data, size);
     file->size = size;
     file->links = links;
+    file->locked = locked;
     file->remove = remove;
     file->hash_table_next = NULL;
     file->queue_next = NULL;

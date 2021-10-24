@@ -74,7 +74,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_f
 // Restituisce 0 in caso di successo,
 //             -1 se non riesce ad aprire il file
 // (pathname è il path assoluto del file da aprire)
-static int open_file(const char* pathname, int flags);
+static int open_file(const char* pathname, int flags, int p);
 static void close_file(const char* pathname);
 
 int main(int argc, char* argv[]) {
@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
                 break;
             case 'D':
                 // Controlla se l'opzione -D è eseguita congiuntamente a -w o -W
-                if(queue.tail == NULL || queue.tail->opt != 'w' || queue.tail->opt != 'W') {
+                if(queue.tail == NULL || (queue.tail->opt != 'w' && queue.tail->opt != 'W')) {
                     fprintf(stderr, "Errore: l'opzione -D può essere usata solo congiuntamente alle opzioni -w o -W.\n");
                     fsp_client_request_queue_freeAllRequests(&queue);
                     return -1;
@@ -129,7 +129,7 @@ int main(int argc, char* argv[]) {
                 break;
             case 'd':
                 // Controlla se l'opzione -d è eseguita congiuntamente a -r o -R
-                if(queue.tail == NULL || queue.tail->opt != 'r' || queue.tail->opt != 'R') {
+                if(queue.tail == NULL || (queue.tail->opt != 'r' && queue.tail->opt != 'R')) {
                     fprintf(stderr, "Errore: l'opzione -d può essere usata solo congiuntamente alle opzioni -r o -R.\n");
                     fsp_client_request_queue_freeAllRequests(&queue);
                     return -1;
@@ -283,7 +283,7 @@ int main(int argc, char* argv[]) {
                 }
                 switch (retVal = read_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
                     case -1:
-                        fprintf(stderr, "Errore richiesta -r: impossibile aggiornare l'albero di ricerca.\n");
+                        fprintf(stderr, "Errore richiesta -r: impossibile aggiornare la tabella hash.\n");
                         break;
                     case -2:
                         fprintf(stderr, "Errore richiesta -r: impossibile allocare memoria.\n");
@@ -307,7 +307,7 @@ int main(int argc, char* argv[]) {
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
                 retVal = lock_opt(req->arg, (unsigned int) time, p, opened_files);
-                if(retVal != 0) fprintf(stderr, "Errore richiesta -l: impossibile aggiornare l'albero di ricerca.\n");
+                if(retVal != 0) fprintf(stderr, "Errore richiesta -l: impossibile aggiornare la tabella hash.\n");
                 break;
             case 'u':
                 if(p) printf("-u %s", req->arg);
@@ -320,7 +320,7 @@ int main(int argc, char* argv[]) {
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
                 retVal = cancel_opt(req->arg, (unsigned int) time, p, opened_files);
-                if(retVal != 0) fprintf(stderr, "Errore richiesta -c: impossibile aggiornare l'albero di ricerca.\n");
+                if(retVal != 0) fprintf(stderr, "Errore richiesta -c: impossibile aggiornare la tabella hash.\n");
                 break;
             default:
                 // Non viene mai eseguito
@@ -412,7 +412,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         if(*n_arg == '\0') {
             fprintf(stderr, "Errore richiesta -w: valore n non specificato dopo la virgola.\n");
             if(p) {
-                printf("Non è stato possibile eseguire l'operazione di scrittura dei file contenuti nella cartella %s sul server (non è stato specificato un valore dopo la virgola).\n", dir_arg);
+                printf("Errore: scrittura sul server dei file contenuti nella cartella %s non eseguita (valore dopo la virgola non specificato).\n", dir_arg);
             }
             return 0;
         }
@@ -422,7 +422,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         if(!isNumber(n_arg, &n) || n < 0 || n > INT_MAX) {
             fprintf(stderr, "Errore richiesta -w: il valore n specificato non è valido.\n");
             if(p) {
-                printf("Non è stato possibile eseguire l'operazione di scrittura dei file contenuti nella cartella %s sul server (il valore n specificato non è valido).\n", dir_arg);
+                printf("Errore: scrittura sul server dei file contenuti nella cartella %s non eseguita (valore n non valido).\n", dir_arg);
             }
             return 0;
         }
@@ -434,7 +434,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         if(!S_ISDIR(info.st_mode)) {
             fprintf(stderr, "Errore richiesta -w: l'argomento %s non è una directory.\n", dir_arg);
             if(p) {
-                printf("Non è stato possibile eseguire l'operazione di scrittura dei file contenuti nella cartella %s sul server (%s non è una directory).\n", dir_arg, dir_arg);
+                printf("Errore: scrittura sul server dei file contenuti nella cartella %s non eseguita (%s non è una directory).\n", dir_arg, dir_arg);
             }
             return 0;
         }
@@ -442,7 +442,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         // Errore stat
         fprintf(stderr, "Errore richiesta -w: directory %s non trovata.\n", dir_arg);
         if(p) {
-            printf("Non è stato possibile eseguire l'operazione di scrittura dei file contenuti nella cartella %s sul server (la directory %s non è stata trovata).\n", dir_arg, dir_arg);
+            printf("Errore: scrittura sul server dei file contenuti nella cartella %s non eseguita (directory %s non trovata).\n", dir_arg, dir_arg);
         }
         return 0;
     }
@@ -451,7 +451,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
     if(getcwd(current_dir, FSP_CLIENT_FILE_MAX_LEN) == NULL) {
         fprintf(stderr, "Errore richiesta -w: è stato impossibile determinare la working directory corrente.\n");
         if(p) {
-            printf("Non è stato possibile eseguire l'operazione di scrittura dei file contenuti nella cartella %s sul server (working directory corrente non determinata).\n", dir_arg);
+            printf("Errore: scrittura sul server dei file contenuti nella cartella %s non eseguita (working directory corrente non determinata).\n", dir_arg);
         }
         return 0;
     }
@@ -460,7 +460,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         // Errore: impossibile accedere alla directory
         fprintf(stderr, "Errore richiesta -w: è stato impossibile accedere alla directory %s.\n", dir_arg);
         if(p) {
-            printf("Non è stato possibile eseguire l'operazione di scrittura dei file contenuti nella cartella %s sul server (impossibile accedere alla directory %s).\n", dir_arg, dir_arg);
+            printf("Errore: scrittura sul server dei file contenuti nella cartella %s non eseguita (impossibile accedere alla directory %s).\n", dir_arg, dir_arg);
         }
         return 0;
     }
@@ -540,12 +540,12 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                 // Se il file non esiste ancora, allora lo apre con i flag O_CREATE | O_LOCK
                 int append = 0;
                 OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
-                if(opened_file != NULL || (open_file(filename, O_DEFAULT) == 0)) {
+                if(opened_file != NULL || (open_file(filename, O_DEFAULT, 0) == 0)) {
                     // Scrive in append
                     append = 1;
-                } else if(open_file(filename, O_CREATE | O_LOCK) != 0) {
+                } else if(open_file(filename, O_CREATE | O_LOCK, 1) != 0) {
                     // Apre il file
-                    if(p) printf("Non è stato possibile scrivere il file %s nel server (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
+                    if(p) printf("Errore: scrittura del file %s sul server non eseguita (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
                     continue;
                 }
                 // Aggiunge il file nella tabella hash se necessario
@@ -562,7 +562,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                     size_t buf_size;
                     
                     if(!S_ISREG(info.st_mode)) {
-                        if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (file non regolare).\n", filename);
+                        if(p) printf("Errore: scrittura del file %s sul server non eseguita (file non regolare).\n", filename);
                         continue;
                     }
                     buf_size = info.st_size;
@@ -578,13 +578,13 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                         size_t bytes;
                         bytes = fread(buf, 1, buf_size, file);
                         if(bytes != buf_size) {
-                            if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (scrittura nel buffer non riuscita).\n", filename);
+                            if(p) printf("Errore: scrittura in append del file %s sul server non eseguita (scrittura nel buffer non riuscita).\n", filename);
                             fclose(file);
                             free(buf);
                             continue;
                         }
                     } else {
-                        if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (apertura non riuscita).\n", filename);
+                        if(p) printf("Errore: scrittura in append del file %s sul server non eseguita (apertura non riuscita).\n", filename);
                         free(buf);
                         continue;
                     }
@@ -692,13 +692,13 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                     if(retVal == 0) {
                         // Operazione terminata con successo
                         if(append) {
-                            printf("Il file %s è stato scritto (in append) nel server con successo.\n", filename);
+                            printf("Il file %s è stato scritto in append sul server con successo.\n", filename);
                         } else {
-                            printf("Il file %s è stato scritto nel server con successo.\n", filename);
+                            printf("Il file %s è stato scritto sul server con successo.\n", filename);
                         }
                     } else {
                         // Operazione non terminata con successo
-                        printf("Non è stato possibile scrivere il file %s nel server.\n", filename);
+                        printf("Errore: scrittura del file %s sul server non eseguita (operazione non riuscita).\n", filename);
                     }
                 }
                 
@@ -751,7 +751,7 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
             }
             
             // Stampa l'esito sullo standard output
-            if(p) printf("Non è stato possibile scrivere il file %s nel server in quanto inesistente.\n", file);
+            if(p) printf("Errore: scrittura del file %s sul server non eseguita (file inesistente).\n", file);
             
             if((file = strtok(NULL, ",")) != NULL) continue;
             return 0;
@@ -762,12 +762,12 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         // Se il file non esiste ancora, allora lo apre con i flag O_CREATE | O_LOCK
         int append = 0;
         OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
-        if(opened_file != NULL || (open_file(filename, O_DEFAULT) == 0)) {
+        if(opened_file != NULL || (open_file(filename, O_DEFAULT, 0) == 0)) {
             // Scrive in append
             append = 1;
-        } else if(open_file(filename, O_CREATE | O_LOCK) != 0) {
+        } else if(open_file(filename, O_CREATE | O_LOCK, 1) != 0) {
             // Apre il file
-            if(p) printf("Non è stato possibile scrivere il file %s nel server (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
+            if(p) printf("Errore: scrittura del file %s sul server non eseguita (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
             if((file = strtok(NULL, ",")) != NULL) continue;
             return 0;
         }
@@ -786,13 +786,13 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
             struct stat info;
             if(stat(filename, &info) == 0) {
                 if(!S_ISREG(info.st_mode)) {
-                    if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (file non regolare).\n", filename);
+                    if(p) printf("Errore: scrittura in append del file %s sul server non eseguita (file non regolare).\n", filename);
                     continue;
                 }
                 buf_size = info.st_size;
             } else {
                 // Errore stat
-                if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (tipo sconosciuto).\n", filename);
+                if(p) printf("Errore: scrittura in append del file %s sul server non eseguita (tipo sconosciuto).\n", filename);
                 continue;
             }
             
@@ -806,13 +806,13 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
                 size_t bytes;
                 bytes = fread(buf, 1, buf_size, file);
                 if(bytes != buf_size) {
-                    if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (scrittura nel buffer non riuscita).\n", filename);
+                    if(p) printf("Errore: scrittura in append del file %s sul server non eseguita (scrittura nel buffer non riuscita).\n", filename);
                     fclose(file);
                     free(buf);
                     continue;
                 }
             } else {
-                if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (apertura non riuscita).\n", filename);
+                if(p) printf("Errore: scrittura in append del file %s sul server non eseguita (apertura non riuscita).\n", filename);
                 free(buf);
                 continue;
             }
@@ -920,13 +920,13 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
             if(retVal == 0) {
                 // Operazione terminata con successo
                 if(append) {
-                    printf("Il file %s è stato scritto (in append) nel server con successo.\n", filename);
+                    printf("Il file %s è stato scritto in append sul server con successo.\n", filename);
                 } else {
-                    printf("Il file %s è stato scritto nel server con successo.\n", filename);
+                    printf("Il file %s è stato scritto sul server con successo.\n", filename);
                 }
             } else {
                 // Operazione non terminata con successo
-                printf("Non è stato possibile scrivere il file %s nel server.\n", filename);
+                printf("Errore: scrittura del file %s sul server non eseguita (operazione non riuscita).\n", filename);
             }
         }
         
@@ -958,8 +958,8 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
         if(opened_file == NULL) {
             // Il file non è ancora stato aperto
             // Apre il file
-            if(open_file(file, O_DEFAULT) != 0) {
-                if(p) printf("Non è stato possibile leggere il file %s dal server (apertura del file non riuscita).\n", file);
+            if(open_file(file, O_DEFAULT, 1) != 0) {
+                if(p) printf("Errore: lettura del file %s dal server non eseguita (apertura del file non riuscita).\n", file);
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
             }
@@ -1021,7 +1021,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
                 printf("Il file %s è stato letto dal server con successo (%lu bytes letti).\n", file, buf_size);
             } else {
                 // Operazione non terminata con successo
-                printf("Non è stato possibile leggere il file %s dal server.\n", file);
+                printf("Errore: lettura del file %s dal server non eseguita (operazione non riuscita).\n", file);
             }
         }
         
@@ -1074,7 +1074,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
                     // Non sono stati scritti tutti i byte (errore)
                     fprintf(stderr, "Errore richiesta -r: non è stato possibile scrivere il file %s nella cartella %s.\n", file, dirname);
                     if(p) {
-                        printf("Non è stato possibile scrivere il file %s nella cartella %s.\n", file, dirname);
+                        printf("Errore: scrittura del file %s nella cartella %s non riuscita.\n", file, dirname);
                     }
                 } else {
                     if(p) {
@@ -1087,7 +1087,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
                 // Errore durante l'apertura di _file
                 fprintf(stderr, "Errore richiesta -r: non è stato possibile aprire il file %s in modalità scrittura nella cartella %s.\n", file, dirname);
                 if(p) {
-                    printf("Non è stato possibile scrivere il file %s nella cartella %s.\n", file, dirname);
+                    printf("Errore: scrittura del file %s nella cartella %s non riuscita.\n", file, dirname);
                 }
             }
 
@@ -1117,7 +1117,7 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
             fprintf(stderr, "Errore richiesta -R: il valore n specificato non è valido.\n");
             // Stampa l'esito sullo standard output
             if(p) {
-                printf("Non è stato possibile scrivere nessun file nella cartella %s in quanto il valore n dell'argomento non è valido.\n", dirname);
+                printf("Errore: impossibile scrivere i file nella cartella %s (valore n non valido).\n", dirname);
             }
             return;
         }
@@ -1161,7 +1161,7 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
             printf("Sono stati scritti con successo %d file nella cartella %s.\n", retVal, dirname);
         } else {
             // Operazione non terminata con successo
-            printf("Non è stato possibile scrivere nessun file nella cartella %s.\n", dirname);
+            printf("Errore: non è stato possibile scrivere nessun file nella cartella %s.\n", dirname);
         }
     }
     
@@ -1182,8 +1182,8 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         if(opened_file == NULL) {
             // Il file non è ancora stato aperto
             // Apre il file
-            if(open_file(file, O_LOCK) != 0) {
-                if(p) printf("Non è stato possibile settare il flag O_LOCK al file %s durante la sua apertura.\n", file);
+            if(open_file(file, O_LOCK, 1) != 0) {
+                if(p) printf("Errore: non è stato possibile settare il flag O_LOCK al file %s durante la sua apertura.\n", file);
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
             }
@@ -1243,7 +1243,7 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
                 printf("Il flag O_LOCK è stato settato al file %s con successo.\n", file);
             } else {
                 // Operazione non terminata con successo
-                printf("Non è stato possibile settare il flag O_LOCK al file %s.\n", file);
+                printf("Errore: non è stato possibile settare il flag O_LOCK al file %s.\n", file);
             }
         }
         
@@ -1312,7 +1312,7 @@ static void unlock_opt(char* arg, unsigned int time, int p) {
                 printf("Il flag O_LOCK è stato resettato sul file %s con successo.\n", file);
             } else {
                 // Operazione non terminata con successo
-                printf("Non è stato possibile resettare il flag O_LOCK sul file %s.\n", file);
+                printf("Errore: non è stato possibile resettare il flag O_LOCK sul file %s.\n", file);
             }
         }
         
@@ -1341,8 +1341,8 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         // Controlla se il file è ancora aperto o è stato appena chiuso
         if(opened_file == NULL) {
             // Apre il file
-            if(open_file(file, O_LOCK) != 0) {
-                if(p) printf("Non è stato possibile rimuovere dal server il file %s (apertura con flag O_LOCK non riuscita).\n", file);
+            if(open_file(file, O_LOCK, 1) != 0) {
+                if(p) printf("Errore: non è stato possibile rimuovere dal server il file %s (apertura con flag O_LOCK non riuscita).\n", file);
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
             }
@@ -1404,7 +1404,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
                 printf("Il file %s è stato rimosso dal server con successo.\n", file);
             } else {
                 // Operazione non terminata con successo
-                printf("Non è stato possibile rimuovere dal server il file %s.\n", file);
+                printf("Errore: non è stato possibile rimuovere dal server il file %s.\n", file);
             }
         }
         
@@ -1419,52 +1419,52 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
     return 0;
 }
 
-static int open_file(const char* pathname, int flags) {
+static int open_file(const char* pathname, int flags, int p) {
     if(openFile(pathname, flags) != 0) {
         switch(errno) {
             case EINVAL:
                 // Se pathname == NULL || (flags != O_DEFAULT && flags != O_CREATE && flags != O_LOCK && flags != O_CREATE | O_LOCK)
-                fprintf(stderr, "Errore openFile: uno o più argomenti passati alla funzione non sono validi.\n");
+                if(p) fprintf(stderr, "Errore openFile: uno o più argomenti passati alla funzione non sono validi.\n");
                 break;
             case ENOTCONN:
                 // Se non è stata aperta la connessione con openConnection()
-                fprintf(stderr, "Errore openFile: la connessione non è stata precedentemente aperta con openConnection.\n");
+                if(p) fprintf(stderr, "Errore openFile: la connessione non è aperta (usare openConnection).\n");
                 break;
             case ENOBUFS:
                 // Se la memoria per il buffer non è sufficiente
-                fprintf(stderr, "Errore openFile: la memoria per il buffer non è sufficiente.\n");
+                if(p) fprintf(stderr, "Errore openFile: la memoria per il buffer non è sufficiente.\n");
                 break;
             case EIO:
                 // Se ci sono stati errori di lettura e scrittura su socket
-                fprintf(stderr, "Errore openFile: si è verificato un errore di lettura o scrittura su socket.\n");
+                if(p) fprintf(stderr, "Errore openFile: si è verificato un errore di lettura o scrittura su socket.\n");
                 break;
             case ECONNABORTED:
                 // Se il servizio non è disponibile e la connessione è stata chiusa
-                fprintf(stderr, "Errore openFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
+                if(p) fprintf(stderr, "Errore openFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
                 break;
             case EBADMSG:
                 // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
-                fprintf(stderr, "Errore openFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
+                if(p) fprintf(stderr, "Errore openFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
                 break;
             case ENOENT:
                 // Se non viene passato il flag O_CREATE e il file pathname non è presente sul server
-                fprintf(stderr, "Errore openFile: non è stato passato il flag O_CREATE, ma il file %s non è presente sul server.\n", pathname);
+                if(p) fprintf(stderr, "Errore openFile: il file %s non è presente sul server (flag O_CREATE non indicato).\n", pathname);
                 break;
             case ENOMEM:
                 // Se non c'è sufficiente memoria sul server per eseguire l'operazione
-                fprintf(stderr, "Errore openFile: memoria sul server insufficiente per creare il file %s.\n", pathname);
+                if(p) fprintf(stderr, "Errore openFile: memoria sul server insufficiente per creare il file %s.\n", pathname);
                 break;
             case EPERM:
                 // Se l'operazione non è consentita
-                fprintf(stderr, "Errore openFile: operazione non consentita sul file %s.\n", pathname);
+                if(p) fprintf(stderr, "Errore openFile: operazione non consentita sul file %s.\n", pathname);
                 break;
             case EEXIST:
                 // Se viene passato il flag O_CREATE ed il file pathname esiste già memorizzato nel server
-                fprintf(stderr, "Errore openFile: è stato passato il flag O_CREATE, ma il file %s è già presente sul server.\n", pathname);
+                if(p) fprintf(stderr, "Errore openFile: è stato passato il flag O_CREATE, ma il file %s è già presente sul server.\n", pathname);
                 break;
             case ECANCELED:
                 // Se non è stato possibile eseguire l'operazione
-                fprintf(stderr, "Errore openFile: non è stato possibile eseguire l'operazione sul file %s.\n", pathname);
+                if(p) fprintf(stderr, "Errore openFile: non è stato possibile eseguire l'operazione sul file %s.\n", pathname);
                 break;
             default:
                 break;

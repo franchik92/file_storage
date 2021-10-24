@@ -27,6 +27,9 @@ struct fsp_clients_hash_table* fsp_clients_hash_table_new(size_t size) {
         return NULL;
     }
     
+    for(int i = 0; i < size; i++) {
+        (hash_table->table)[i] = NULL;
+    }
     hash_table->size = size;
     hash_table->clients_num = 0;
     
@@ -51,7 +54,7 @@ int fsp_clients_hash_table_insert(struct fsp_clients_hash_table* hash_table, str
         return -2;
     } else {
         struct fsp_client* _client_prev = NULL;
-        while(_client != NULL || _client->sfd < client->sfd) {
+        while(_client != NULL && _client->sfd < client->sfd) {
             _client_prev = _client;
             _client = _client->next;
         }
@@ -76,7 +79,7 @@ struct fsp_client* fsp_clients_hash_table_search(const struct fsp_clients_hash_t
     unsigned long int index = hash_function(hash_table->size, sfd);
     struct fsp_client* _client = (hash_table->table)[index];
     
-    while(_client != NULL || _client->sfd < sfd) {
+    while(_client != NULL && _client->sfd < sfd) {
         _client = _client->next;
     }
     if(_client == NULL || _client->sfd != sfd) return NULL;
@@ -90,7 +93,7 @@ struct fsp_client* fsp_clients_hash_table_delete(struct fsp_clients_hash_table* 
     struct fsp_client* _client = (hash_table->table)[index];
     
     struct fsp_client* _client_prev = NULL;
-    while(_client != NULL || _client->sfd < sfd) {
+    while(_client != NULL && _client->sfd < sfd) {
         _client_prev = _client;
         _client = _client->next;
     }

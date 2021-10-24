@@ -38,6 +38,9 @@ struct fsp_opened_files_hash_table* fsp_opened_files_hash_table_new(size_t size)
         return NULL;
     }
     
+    for(int i = 0; i < size; i++) {
+        (hash_table->table)[i] = NULL;
+    }
     hash_table->size = size;
     hash_table->files_num = 0;
     
@@ -69,7 +72,7 @@ int fsp_opened_files_hash_table_insert(struct fsp_opened_files_hash_table* hash_
         return -3;
     } else {
         struct fsp_opened_file* _opened_file_prev = NULL;
-        while(_opened_file != NULL || (cmp = strcmp(_opened_file->filename, opened_file->filename)) < 0) {
+        while(_opened_file != NULL && (cmp = strcmp(_opened_file->filename, opened_file->filename)) < 0) {
             _opened_file_prev = _opened_file;
             _opened_file = _opened_file->next;
         }
@@ -95,8 +98,8 @@ struct fsp_opened_file* fsp_opened_files_hash_table_search(const struct fsp_open
     unsigned long int index = hash_function(hash_table->size, filename);
     struct fsp_opened_file* _opened_file = (hash_table->table)[index];
     
-    int cmp;
-    while(_opened_file != NULL || (cmp = strcmp(_opened_file->filename, filename)) < 0) {
+    int cmp = -1;
+    while(_opened_file != NULL && (cmp = strcmp(_opened_file->filename, filename)) < 0) {
         _opened_file = _opened_file->next;
     }
     if(_opened_file == NULL || cmp != 0) return NULL;
@@ -109,9 +112,9 @@ void fsp_opened_files_hash_table_delete(struct fsp_opened_files_hash_table* hash
     unsigned long int index = hash_function(hash_table->size, filename);
     struct fsp_opened_file* _opened_file = (hash_table->table)[index];
     
-    int cmp;
+    int cmp = -1;
     struct fsp_opened_file* _opened_file_prev = NULL;
-    while(_opened_file != NULL || (cmp = strcmp(_opened_file->filename, filename)) < 0) {
+    while(_opened_file != NULL && (cmp = strcmp(_opened_file->filename, filename)) < 0) {
         _opened_file_prev = _opened_file;
         _opened_file = _opened_file->next;
     }

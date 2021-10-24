@@ -46,7 +46,7 @@ static int receiveFspResp(struct fsp_response* resp);
 static int saveData(const char* dirname, size_t data_len, void* data);
 
 int openConnection(const char* sockname, int msec, const struct timespec abstime) {
-    if(sockname == NULL || msec < 0 || abstime.tv_sec < 0 || abstime.tv_nsec < 0 || fsp_buf == NULL) {
+    if(sockname == NULL || msec < 0 || abstime.tv_sec < 0 || abstime.tv_nsec < 0 || fsp_buf != NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -69,7 +69,7 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
     struct sockaddr_un sa;
     sa.sun_family = AF_UNIX;
     strncpy(sa.sun_path, sockname, UNIX_PATH_MAX);
-    sa.sun_path[103] = '\0';
+    sa.sun_path[UNIX_PATH_MAX-1] = '\0';
     
     struct timespec start, end;
     clock_gettime(CLOCK_REALTIME, &start);
@@ -101,20 +101,24 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
         }
     }
     
-    struct fsp_response resp;
-    if(receiveFspResp(&resp) != 0 || resp.code == 421) {
-        errno = ECONNREFUSED;
-        return -1;
-    }
-    if(resp.code != 220) {
-        errno = EBADMSG;
-        return -1;
-    }
-    
     // Alloca memoria per il buffer
     fsp_buf_size = FSP_API_BUF_DEF_SIZE;
     if((fsp_buf = malloc(fsp_buf_size)) == NULL) {
         errno = ENOBUFS;
+        return -1;
+    }
+    
+    struct fsp_response resp;
+    if(receiveFspResp(&resp) != 0 || resp.code == 421) {
+        free(fsp_buf);
+        fsp_buf = NULL;
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    if(resp.code != 220) {
+        free(fsp_buf);
+        fsp_buf = NULL;
+        errno = EBADMSG;
         return -1;
     }
 

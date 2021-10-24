@@ -22,8 +22,8 @@ int fsp_files_list_add(struct fsp_files_list** list, struct fsp_file* file) {
     } else {
         struct fsp_files_list* _list = *list;
         struct fsp_files_list* _list_prev = NULL;
-        int cmp;
-        while(_list != NULL || (cmp = strcmp(file->pathname, (_list->file)->pathname)) < 0) {
+        int cmp = -1;
+        while(_list != NULL && (cmp = strcmp((_list->file)->pathname, file->pathname)) < 0) {
             _list_prev = _list;
             _list = _list->next;
         }
@@ -34,7 +34,11 @@ int fsp_files_list_add(struct fsp_files_list** list, struct fsp_file* file) {
             return -3;
         } else {
             _file_list->next = _list;
-            _list_prev->next = _file_list;
+            if(_list_prev == NULL) {
+                *list = _file_list;
+            } else {
+                _list_prev->next = _file_list;
+            }
         }
     }
     
@@ -44,8 +48,8 @@ int fsp_files_list_add(struct fsp_files_list** list, struct fsp_file* file) {
 int fsp_files_list_contains(const struct fsp_files_list* list, const char* pathname) {
     if(list == NULL || pathname == NULL) return 0;
     
-    int cmp;
-    while(list != NULL || (cmp = strcmp((list->file)->pathname, pathname)) < 0) {
+    int cmp = -1;
+    while(list != NULL && (cmp = strcmp((list->file)->pathname, pathname)) < 0) {
         list = list->next;
     }
     if(list == NULL || cmp != 0) return 0;
@@ -58,8 +62,8 @@ struct fsp_file* fsp_files_list_remove(struct fsp_files_list** list, const char*
     
     struct fsp_files_list* _list = *list;
     struct fsp_files_list* _list_prev = NULL;
-    int cmp;
-    while(_list != NULL || (cmp = strcmp((_list->file)->pathname, pathname)) < 0) {
+    int cmp = -1;
+    while(_list != NULL && (cmp = strcmp((_list->file)->pathname, pathname)) < 0) {
         _list_prev = _list;
         _list = _list->next;
     }
