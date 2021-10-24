@@ -32,38 +32,41 @@ typedef struct fsp_opened_files_hash_table OpenedFiles;
 
 // Funzioni che eseguono le richieste del client
 static void printUsage(void);
-// Restituisce -1 se non è stato possibile aggiungere un file appena aperto nell'albero binario di ricerca,
-// -2 se non riesce a tornare alla working directory precedente alla sua chiamata,
+// Restituisce -1 se non è stato possibile aggiungere un file appena aperto nella tabella hash,
+// -2 se non è stato possibile allocare memoria per il buffer (scritture in append),
+// -3 se non riesce a tornare alla working directory precedente alla sua chiamata,
 // 0 altrimenti.
 static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
-// Restituisce -1 se non è stato possibile aggiungere un file appena aperto nell'albero binario di ricerca,
+// Restituisce -1 se non è stato possibile aggiungere un file appena aperto nella tabella hash,
+// -2 se non è stato possibile allocare memoria per il buffer (scritture in append),
 // 0 altrimenti.
 static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
-// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
+// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
+// -2 se non è stato possibile allocare memoria per il buffer (scritture in append),
 // 0 altrimenti.
 static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
-// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
+// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
 // -2 se non è stato possibile allocare memoria,
 // 0 altrimenti.
 static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
 static void Read_opt(char* arg, char* dirname, unsigned int time, int p);
-// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
+// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
 // 0 altrimenti.
 static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_files);
 static void unlock_opt(char* arg, unsigned int time, int p);
-// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nell'albero binario di ricerca,
+// Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
 // 0 altrimenti.
 static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_files);
 
 // Funzioni per l'apertura e la chiusura dei file.
 // Viene fatta richiesta automatica di apertura di un file
-// - prima di una operazione di scrittura (-w, -W) con flags O_CREATE | O_LOCK,
+// - prima di una operazione di scrittura (-w, -W) con flag O_DEFAULT se il file non è stato precedentemente aperto ed esiste sul server,
+// - prima di una operazione di scrittura (-w, -W) con flags O_CREATE | O_LOCK se il file non è stato precedentemente aperto e non esiste sul server,
 // - prima di una operazione di lettura (-r) con flag O_DEFAULT se il file non è stato precedentemente aperto,
 // - al posto dell'operazione di lock (-l) con flag O_LOCK se il file non è stato precedentemente aperto,
 // - prima di una operazione di cancellazione (-c) con flag O_LOCK se il file non è già aperto con flag O_LOCK.
 // Viene fatta richiesta automatica di chiusura di un file
-// - prima di una operazione di scrittura se il file è aperto,
-// - al termine di una operazione di scrittura,
+// - al termine di una operazione di scrittura se il file è stato aperto con flags O_CREATE | O_LOCK,
 // - prima di una operazione di cancellazione se il file è aperto, ma non ha il flag O_LOCK settato,
 // - al termine di una operazione di cancellazione.
 // Al termine dell'esecuzione del programma viene fatta richiesta di chiusura di tutti i file rimasti aperti.
@@ -229,7 +232,7 @@ int main(int argc, char* argv[]) {
             time = 0;
         }
         
-        int res = 0;
+        int retVal = 0;
         switch(req->opt) {
             case 'w':
                 if(p) {
@@ -238,11 +241,14 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                switch (res = write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
+                switch (retVal = write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
                     case -1:
-                        fprintf(stderr, "Errore richiesta -w: impossibile aggiornare l'albero di ricerca.\n");
+                        fprintf(stderr, "Errore richiesta -w: impossibile aggiornare la tabella hash.\n");
                         break;
                     case -2:
+                        fprintf(stderr, "Errore richiesta -w: impossibile allocare memoria.\n");
+                        break;
+                    case -3:
                         fprintf(stderr, "Errore richiesta -w: impossibile tornare alla working directory iniziale.\n");
                         break;
                     default:
@@ -257,8 +263,16 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                res = Write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files);
-                if(res != 0) fprintf(stderr, "Errore richiesta -W: impossibile aggiornare l'albero di ricerca.\n");
+                switch (retVal = Write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
+                    case -1:
+                        fprintf(stderr, "Errore richiesta -W: impossibile aggiornare la tabella hash.\n");
+                        break;
+                    case -2:
+                        fprintf(stderr, "Errore richiesta -W: impossibile allocare memoria.\n");
+                        break;
+                    default:
+                        break;
+                }
                 break;
             case 'r':
                 if(p) {
@@ -267,7 +281,7 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                switch (res = read_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
+                switch (retVal = read_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
                     case -1:
                         fprintf(stderr, "Errore richiesta -r: impossibile aggiornare l'albero di ricerca.\n");
                         break;
@@ -292,8 +306,8 @@ int main(int argc, char* argv[]) {
                 if(p) printf("-l %s", req->arg);
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
-                res = lock_opt(req->arg, (unsigned int) time, p, opened_files);
-                if(res != 0) fprintf(stderr, "Errore richiesta -l: impossibile aggiornare l'albero di ricerca.\n");
+                retVal = lock_opt(req->arg, (unsigned int) time, p, opened_files);
+                if(retVal != 0) fprintf(stderr, "Errore richiesta -l: impossibile aggiornare l'albero di ricerca.\n");
                 break;
             case 'u':
                 if(p) printf("-u %s", req->arg);
@@ -305,17 +319,17 @@ int main(int argc, char* argv[]) {
                 if(p) printf("-c %s", req->arg);
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
-                res = cancel_opt(req->arg, (unsigned int) time, p, opened_files);
-                if(res != 0) fprintf(stderr, "Errore richiesta -c: impossibile aggiornare l'albero di ricerca.\n");
+                retVal = cancel_opt(req->arg, (unsigned int) time, p, opened_files);
+                if(retVal != 0) fprintf(stderr, "Errore richiesta -c: impossibile aggiornare l'albero di ricerca.\n");
                 break;
             default:
                 // Non viene mai eseguito
                 fprintf(stderr, "Errore: richiesta -%c non riconosciuta.\n", req->opt);
-                res = -1;
+                retVal = -1;
                 break;
         }
         fsp_client_request_queue_freeRequest(req);
-        if(res != 0) {
+        if(retVal != 0) {
             fsp_client_request_queue_freeRequest(req);
             fsp_client_request_queue_freeAllRequests(&queue);
             fsp_opened_files_hash_table_deleteAll(opened_files, close_file);
@@ -389,6 +403,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
     char* dir_arg = arg;
     char* n_arg = NULL;
     long int n = -1;
+    int retVal;
     
     while(*arg != ',' || *arg != '\0') arg++;
     if(*arg == ',') {
@@ -450,11 +465,11 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         return 0;
     }
     
-    if(write_opt_rec(&n, dirname, time, p, opened_files) != 0) return -1;
+    if((retVal = write_opt_rec(&n, dirname, time, p, opened_files)) != 0) return retVal;
     
     if(chdir(current_dir) != 0) {
         // Errore: impossibile tornare alla working directory precedente
-        return -2;
+        return -3;
     }
     
     return 0;
@@ -480,6 +495,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
     }
     
     struct dirent* entry = NULL;
+    int retVal;
     while(((void)(errno = 0), entry = readdir(dir)) != NULL) {
         // Controlla se dirent->d_name è una directory
         struct stat info;
@@ -496,7 +512,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                     continue;
                 }
                 
-                if(write_opt_rec(n, dirname, time, p, opened_files) != 0) return -1;
+                if((retVal = write_opt_rec(n, dirname, time, p, opened_files)) != 0) return retVal;
                 
                 if(chdir(current_dir) != 0) {
                     // Errore: impossibile tornare alla working directory precedente
@@ -512,7 +528,6 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                 }
                 
                 char filename[FSP_CLIENT_FILE_MAX_LEN];
-                int result;
                 
                 // Determina il path assoluto del file entry->d_name e lo salva in filename
                 if(realpath(entry->d_name, filename) == NULL) {
@@ -521,81 +536,178 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                 }
                 
                 // Controlla se il file è già stato aperto
+                // Se il file è già stato aperto o è possibile aprirlo con il flag O_DEFAULT, allora scrive in append al file già esistente
+                // Se il file non esiste ancora, allora lo apre con i flag O_CREATE | O_LOCK
+                int append = 0;
                 OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
-                if(opened_file != NULL) {
-                    // Chiude il file
-                    close_file(opened_file->filename);
-                    fsp_opened_files_hash_table_delete(opened_files, filename);
+                if(opened_file != NULL || (open_file(filename, O_DEFAULT) == 0)) {
+                    // Scrive in append
+                    append = 1;
+                } else if(open_file(filename, O_CREATE | O_LOCK) != 0) {
+                    // Apre il file
+                    if(p) printf("Non è stato possibile scrivere il file %s nel server (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
+                    continue;
                 }
-                // Apre il file
-                if(open_file(filename, O_CREATE | O_LOCK) != 0) continue;
-                // Aggiunge il file nella tabella hash
-                if(fsp_opened_files_hash_table_insert(opened_files, filename, O_CREATE | O_LOCK) != 0) {
+                // Aggiunge il file nella tabella hash se necessario
+                if(opened_file == NULL && fsp_opened_files_hash_table_insert(opened_files, filename, append ? O_DEFAULT : O_CREATE | O_LOCK) != 0) {
                     close_file(filename);
+                    closedir(dir);
                     return -1;
                 }
                 
-                if((result = writeFile(filename, dirname)) != 0) {
-                    switch(errno) {
-                        case EINVAL:
-                            // Se pathname == NULL || pathname non è un file regolare || dirname non è una directory
-                            fprintf(stderr, "Errore writeFile: uno o più argomenti passati alla funzione non sono validi.\n");
-                            break;
-                        case ENOTCONN:
-                            // Se non è stata aperta la connessione con openConnection()
-                            fprintf(stderr, "Errore writeFile: la connessione non è stata precedentemente aperta con openConnection.\n");
-                            break;
-                        case ENOBUFS:
-                            // Se la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria
-                            fprintf(stderr, "Errore writeFile: la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria.\n");
-                            break;
-                        case EIO:
-                            // Se ci sono stati errori di lettura e scrittura su socket o errori relativi alla scrittura dei file in dirname
-                            fprintf(stderr, "Errore writeFile: si è verificato un errore di I/O.\n");
-                            break;
-                        case ECONNABORTED:
-                            // Se il servizio non è disponibile e la connessione è stata chiusa
-                            fprintf(stderr, "Errore writeFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
-                            break;
-                        case EBADMSG:
-                            // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
-                            fprintf(stderr, "Errore writeFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
-                            break;
-                        case ENOENT:
-                            // Se il file pathname non è presente sul server
-                            fprintf(stderr, "Errore writeFile: il file %s non è presente sul server.\n", filename);
-                            break;
-                        case ENOMEM:
-                            // Se non c'è sufficiente memoria sul server per eseguire l'operazione
-                            fprintf(stderr, "Errore writeFile: memoria sul server insufficiente per scrivere il file %s.\n", filename);
-                            break;
-                        case EPERM:
-                            // Se l'operazione non è consentita
-                            fprintf(stderr, "Errore writeFile: operazione non consentita sul file %s.\n", filename);
-                            break;
-                        case ECANCELED:
-                            // Se non è stato possibile eseguire l'operazione
-                            fprintf(stderr, "Errore writeFile: non è stato possibile eseguire l'operazione sul file %s.\n", filename);
-                            break;
-                        default:
-                            break;
+                if(append) {
+                    // Scrive in append al file già esistente
+                    FILE* file;
+                    void* buf;
+                    size_t buf_size;
+                    
+                    if(!S_ISREG(info.st_mode)) {
+                        if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (file non regolare).\n", filename);
+                        continue;
+                    }
+                    buf_size = info.st_size;
+                    
+                    // Alloca il buffer
+                    if((buf = malloc(buf_size)) == NULL) {
+                        closedir(dir);
+                        return -2;
+                    }
+                    
+                    // Copia nel buffer il contenuto del file
+                    if((file = fopen(filename, "rb")) != NULL) {
+                        size_t bytes;
+                        bytes = fread(buf, 1, buf_size, file);
+                        if(bytes != buf_size) {
+                            if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (scrittura nel buffer non riuscita).\n", filename);
+                            fclose(file);
+                            free(buf);
+                            continue;
+                        }
+                    } else {
+                        if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (apertura non riuscita).\n", filename);
+                        free(buf);
+                        continue;
+                    }
+                    fclose(file);
+                    
+                    if((retVal = appendToFile(filename, buf, buf_size, dirname)) != 0) {
+                        switch(errno) {
+                            case EINVAL:
+                                // Se pathname == NULL || buf == NULL || size < 0 || dirname non è una directory (se dirname != NULL)
+                                fprintf(stderr, "Errore appendToFile: uno o più argomenti passati alla funzione non sono validi.\n");
+                                break;
+                            case ENOTCONN:
+                                // Se non è stata aperta la connessione con openConnection()
+                                fprintf(stderr, "Errore appendToFile: la connessione non è stata precedentemente aperta con openConnection.\n");
+                                break;
+                            case ENOBUFS:
+                                // Se la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria
+                                fprintf(stderr, "Errore appendToFile: la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria.\n");
+                                break;
+                            case EIO:
+                                // Se ci sono stati errori di lettura e scrittura su socket o errori relativi alla scrittura dei file in dirname
+                                fprintf(stderr, "Errore appendToFile: si è verificato un errore di I/O.\n");
+                                break;
+                            case ECONNABORTED:
+                                // Se il servizio non è disponibile e la connessione è stata chiusa
+                                fprintf(stderr, "Errore appendToFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
+                                break;
+                            case EBADMSG:
+                                // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
+                                fprintf(stderr, "Errore appendToFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
+                                break;
+                            case ENOENT:
+                                // Se il file pathname non è presente sul server
+                                fprintf(stderr, "Errore appendToFile: il file %s non è presente sul server.\n", filename);
+                                break;
+                            case ENOMEM:
+                                // Se non c'è sufficiente memoria sul server per eseguire l'operazione
+                                fprintf(stderr, "Errore appendToFile: memoria sul server insufficiente per scrivere il file %s.\n", filename);
+                                break;
+                            case EPERM:
+                                // Se l'operazione non è consentita
+                                fprintf(stderr, "Errore appendToFile: operazione non consentita sul file %s.\n", filename);
+                                break;
+                            case ECANCELED:
+                                // Se non è stato possibile eseguire l'operazione
+                                fprintf(stderr, "Errore appendToFile: non è stato possibile eseguire l'operazione sul file %s.\n", filename);
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    free(buf);
+                } else {
+                    // Scrive un nuovo file
+                    if((retVal = writeFile(filename, dirname)) != 0) {
+                        switch(errno) {
+                            case EINVAL:
+                                // Se pathname == NULL || pathname non è un file regolare || dirname non è una directory
+                                fprintf(stderr, "Errore writeFile: uno o più argomenti passati alla funzione non sono validi.\n");
+                                break;
+                            case ENOTCONN:
+                                // Se non è stata aperta la connessione con openConnection()
+                                fprintf(stderr, "Errore writeFile: la connessione non è stata precedentemente aperta con openConnection.\n");
+                                break;
+                            case ENOBUFS:
+                                // Se la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria
+                                fprintf(stderr, "Errore writeFile: la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria.\n");
+                                break;
+                            case EIO:
+                                // Se ci sono stati errori di lettura e scrittura su socket o errori relativi alla scrittura dei file in dirname
+                                fprintf(stderr, "Errore writeFile: si è verificato un errore di I/O.\n");
+                                break;
+                            case ECONNABORTED:
+                                // Se il servizio non è disponibile e la connessione è stata chiusa
+                                fprintf(stderr, "Errore writeFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
+                                break;
+                            case EBADMSG:
+                                // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
+                                fprintf(stderr, "Errore writeFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
+                                break;
+                            case ENOENT:
+                                // Se il file pathname non è presente sul server
+                                fprintf(stderr, "Errore writeFile: il file %s non è presente sul server.\n", filename);
+                                break;
+                            case ENOMEM:
+                                // Se non c'è sufficiente memoria sul server per eseguire l'operazione
+                                fprintf(stderr, "Errore writeFile: memoria sul server insufficiente per scrivere il file %s.\n", filename);
+                                break;
+                            case EPERM:
+                                // Se l'operazione non è consentita
+                                fprintf(stderr, "Errore writeFile: operazione non consentita sul file %s.\n", filename);
+                                break;
+                            case ECANCELED:
+                                // Se non è stato possibile eseguire l'operazione
+                                fprintf(stderr, "Errore writeFile: non è stato possibile eseguire l'operazione sul file %s.\n", filename);
+                                break;
+                            default:
+                                break;
+                        }
                     }
                 }
                 
                 // Stampa l'esito sullo standard output
                 if(p) {
-                    if(result == 0) {
+                    if(retVal == 0) {
                         // Operazione terminata con successo
-                        printf("Il file %s è stato scritto nel server con successo.\n", filename);
+                        if(append) {
+                            printf("Il file %s è stato scritto (in append) nel server con successo.\n", filename);
+                        } else {
+                            printf("Il file %s è stato scritto nel server con successo.\n", filename);
+                        }
                     } else {
                         // Operazione non terminata con successo
                         printf("Non è stato possibile scrivere il file %s nel server.\n", filename);
                     }
                 }
                 
-                // Chiude il file
-                close_file(filename);
-                fsp_opened_files_hash_table_delete(opened_files, filename);
+                // Chiude il file se era stato aperto con i flag O_CREATE | O_LOCK
+                if(append == 0) {
+                    close_file(filename);
+                    fsp_opened_files_hash_table_delete(opened_files, filename);
+                }
+                
                 // Aggiorna n
                 (*n)--;
                 // Attende time secondi prima di eseguire la prossima operazione
@@ -620,7 +732,7 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
     time = time/1000;
     char* file = NULL;
     char filename[FSP_CLIENT_FILE_MAX_LEN];
-    int result;
+    int retVal;
     
     file = strtok(arg, ",");
     
@@ -646,85 +758,183 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         }
         
         // Controlla se il file è già stato aperto
+        // Se il file è già stato aperto o è possibile aprirlo con il flag O_DEFAULT, allora scrive in append al file già esistente
+        // Se il file non esiste ancora, allora lo apre con i flag O_CREATE | O_LOCK
+        int append = 0;
         OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
-        if(opened_file != NULL) {
-            // Chiude il file
-            close_file(filename);
-            fsp_opened_files_hash_table_delete(opened_files, filename);
-        }
-        // Apre il file
-        if(open_file(filename, O_CREATE | O_LOCK) != 0) {
+        if(opened_file != NULL || (open_file(filename, O_DEFAULT) == 0)) {
+            // Scrive in append
+            append = 1;
+        } else if(open_file(filename, O_CREATE | O_LOCK) != 0) {
+            // Apre il file
             if(p) printf("Non è stato possibile scrivere il file %s nel server (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
             if((file = strtok(NULL, ",")) != NULL) continue;
             return 0;
         }
-        // Aggiunge il file nella tabella hash
-        if(fsp_opened_files_hash_table_insert(opened_files, filename, O_CREATE | O_LOCK) != 0) {
+        // Aggiunge il file nella tabella hash se necessario
+        if(opened_file == NULL && fsp_opened_files_hash_table_insert(opened_files, filename, append ? O_DEFAULT : O_CREATE | O_LOCK) != 0) {
             close_file(filename);
             return -1;
         }
         
-        if((result = writeFile(filename, dirname)) != 0) {
-            switch(errno) {
-                case EINVAL:
-                    // Se pathname == NULL || pathname non è un file regolare || dirname non è una directory
-                    fprintf(stderr, "Errore writeFile: uno o più argomenti passati alla funzione non sono validi.\n");
-                    break;
-                case ENOTCONN:
-                    // Se non è stata aperta la connessione con openConnection()
-                    fprintf(stderr, "Errore writeFile: la connessione non è stata precedentemente aperta con openConnection.\n");
-                    break;
-                case ENOBUFS:
-                    // Se la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria
-                    fprintf(stderr, "Errore writeFile: la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria.\n");
-                    break;
-                case EIO:
-                    // Se ci sono stati errori di lettura e scrittura su socket o errori relativi alla scrittura dei file in dirname
-                    fprintf(stderr, "Errore writeFile: si è verificato un errore di I/O.\n");
-                    break;
-                case ECONNABORTED:
-                    // Se il servizio non è disponibile e la connessione è stata chiusa
-                    fprintf(stderr, "Errore writeFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
-                    break;
-                case EBADMSG:
-                    // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
-                    fprintf(stderr, "Errore writeFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
-                    break;
-                case ENOENT:
-                    // Se il file pathname non è presente sul server
-                    fprintf(stderr, "Errore writeFile: il file %s non è presente sul server.\n", filename);
-                    break;
-                case ENOMEM:
-                    // Se non c'è sufficiente memoria sul server per eseguire l'operazione
-                    fprintf(stderr, "Errore writeFile: memoria sul server insufficiente per scrivere il file %s.\n", filename);
-                    break;
-                case EPERM:
-                    // Se l'operazione non è consentita
-                    fprintf(stderr, "Errore writeFile: operazione non consentita sul file %s.\n", filename);
-                    break;
-                case ECANCELED:
-                    // Se non è stato possibile eseguire l'operazione
-                    fprintf(stderr, "Errore writeFile: non è stato possibile eseguire l'operazione sul file %s.\n", filename);
-                    break;
-                default:
-                    break;
+        if(append) {
+            // Scrive in append al file già esistente
+            FILE* file;
+            void* buf;
+            size_t buf_size;
+            
+            struct stat info;
+            if(stat(filename, &info) == 0) {
+                if(!S_ISREG(info.st_mode)) {
+                    if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (file non regolare).\n", filename);
+                    continue;
+                }
+                buf_size = info.st_size;
+            } else {
+                // Errore stat
+                if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (tipo sconosciuto).\n", filename);
+                continue;
+            }
+            
+            // Alloca il buffer
+            if((buf = malloc(buf_size)) == NULL) {
+                return -2;
+            }
+            
+            // Copia nel buffer il contenuto del file
+            if((file = fopen(filename, "rb")) != NULL) {
+                size_t bytes;
+                bytes = fread(buf, 1, buf_size, file);
+                if(bytes != buf_size) {
+                    if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (scrittura nel buffer non riuscita).\n", filename);
+                    fclose(file);
+                    free(buf);
+                    continue;
+                }
+            } else {
+                if(p) printf("Non è stato possibile scrivere (in append) il file %s nel server (apertura non riuscita).\n", filename);
+                free(buf);
+                continue;
+            }
+            fclose(file);
+            
+            if((retVal = appendToFile(filename, buf, buf_size, dirname)) != 0) {
+                switch(errno) {
+                    case EINVAL:
+                        // Se pathname == NULL || buf == NULL || size < 0 || dirname non è una directory (se dirname != NULL)
+                        fprintf(stderr, "Errore appendToFile: uno o più argomenti passati alla funzione non sono validi.\n");
+                        break;
+                    case ENOTCONN:
+                        // Se non è stata aperta la connessione con openConnection()
+                        fprintf(stderr, "Errore appendToFile: la connessione non è stata precedentemente aperta con openConnection.\n");
+                        break;
+                    case ENOBUFS:
+                        // Se la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria
+                        fprintf(stderr, "Errore appendToFile: la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria.\n");
+                        break;
+                    case EIO:
+                        // Se ci sono stati errori di lettura e scrittura su socket o errori relativi alla scrittura dei file in dirname
+                        fprintf(stderr, "Errore appendToFile: si è verificato un errore di I/O.\n");
+                        break;
+                    case ECONNABORTED:
+                        // Se il servizio non è disponibile e la connessione è stata chiusa
+                        fprintf(stderr, "Errore appendToFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
+                        break;
+                    case EBADMSG:
+                        // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
+                        fprintf(stderr, "Errore appendToFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
+                        break;
+                    case ENOENT:
+                        // Se il file pathname non è presente sul server
+                        fprintf(stderr, "Errore appendToFile: il file %s non è presente sul server.\n", filename);
+                        break;
+                    case ENOMEM:
+                        // Se non c'è sufficiente memoria sul server per eseguire l'operazione
+                        fprintf(stderr, "Errore appendToFile: memoria sul server insufficiente per scrivere il file %s.\n", filename);
+                        break;
+                    case EPERM:
+                        // Se l'operazione non è consentita
+                        fprintf(stderr, "Errore appendToFile: operazione non consentita sul file %s.\n", filename);
+                        break;
+                    case ECANCELED:
+                        // Se non è stato possibile eseguire l'operazione
+                        fprintf(stderr, "Errore appendToFile: non è stato possibile eseguire l'operazione sul file %s.\n", filename);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            free(buf);
+        } else {
+            // Scrive un nuovo file
+            if((retVal = writeFile(filename, dirname)) != 0) {
+                switch(errno) {
+                    case EINVAL:
+                        // Se pathname == NULL || pathname non è un file regolare || dirname non è una directory
+                        fprintf(stderr, "Errore writeFile: uno o più argomenti passati alla funzione non sono validi.\n");
+                        break;
+                    case ENOTCONN:
+                        // Se non è stata aperta la connessione con openConnection()
+                        fprintf(stderr, "Errore writeFile: la connessione non è stata precedentemente aperta con openConnection.\n");
+                        break;
+                    case ENOBUFS:
+                        // Se la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria
+                        fprintf(stderr, "Errore writeFile: la memoria per il buffer non è sufficiente o non è stato possibile allocare memoria.\n");
+                        break;
+                    case EIO:
+                        // Se ci sono stati errori di lettura e scrittura su socket o errori relativi alla scrittura dei file in dirname
+                        fprintf(stderr, "Errore writeFile: si è verificato un errore di I/O.\n");
+                        break;
+                    case ECONNABORTED:
+                        // Se il servizio non è disponibile e la connessione è stata chiusa
+                        fprintf(stderr, "Errore writeFile: il servizio non è disponibile e la connessione è stata chiusa.\n");
+                        break;
+                    case EBADMSG:
+                        // Se uno dei messaggi di richiesta o risposta fsp contiene errori sintattici
+                        fprintf(stderr, "Errore writeFile: il messaggio di richiesta o risposta fsp contiene errori sintattici.\n");
+                        break;
+                    case ENOENT:
+                        // Se il file pathname non è presente sul server
+                        fprintf(stderr, "Errore writeFile: il file %s non è presente sul server.\n", filename);
+                        break;
+                    case ENOMEM:
+                        // Se non c'è sufficiente memoria sul server per eseguire l'operazione
+                        fprintf(stderr, "Errore writeFile: memoria sul server insufficiente per scrivere il file %s.\n", filename);
+                        break;
+                    case EPERM:
+                        // Se l'operazione non è consentita
+                        fprintf(stderr, "Errore writeFile: operazione non consentita sul file %s.\n", filename);
+                        break;
+                    case ECANCELED:
+                        // Se non è stato possibile eseguire l'operazione
+                        fprintf(stderr, "Errore writeFile: non è stato possibile eseguire l'operazione sul file %s.\n", filename);
+                        break;
+                    default:
+                        break;
+                }
             }
         }
         
         // Stampa l'esito sullo standard output
         if(p) {
-            if(result == 0) {
+            if(retVal == 0) {
                 // Operazione terminata con successo
-                printf("Il file %s è stato scritto nel server con successo.\n", filename);
+                if(append) {
+                    printf("Il file %s è stato scritto (in append) nel server con successo.\n", filename);
+                } else {
+                    printf("Il file %s è stato scritto nel server con successo.\n", filename);
+                }
             } else {
                 // Operazione non terminata con successo
                 printf("Non è stato possibile scrivere il file %s nel server.\n", filename);
             }
         }
         
-        // Chiude il file
-        close_file(filename);
-        fsp_opened_files_hash_table_delete(opened_files, filename);
+        // Chiude il file se era stato aperto con i flag O_CREATE | O_LOCK
+        if(append == 0) {
+            close_file(filename);
+            fsp_opened_files_hash_table_delete(opened_files, filename);
+        }
         
         // Attende time secondi prima di eseguire la prossima operazione
         sleep(time);
@@ -738,7 +948,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
     char* file = NULL;
     char* buf = NULL;
     size_t buf_size;
-    int result;
+    int retVal;
     
     file = strtok(arg, ",");
     
@@ -753,7 +963,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
             }
-            // Aggiunge il file all'albero binario di ricerca
+            // Aggiunge il file nella tabella hash
             if(fsp_opened_files_hash_table_insert(files, file, O_DEFAULT) != 0) {
                 close_file(file);
                 return -1;
@@ -761,7 +971,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
         }
         
         // Legge il file
-        if((result = readFile(file, (void**) &buf, &buf_size)) != 0) {
+        if((retVal = readFile(file, (void**) &buf, &buf_size)) != 0) {
             switch(errno) {
                 case EINVAL:
                     // Se pathname == NULL || buf == NULL || size == NULL
@@ -806,7 +1016,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
         
         // Stampa l'esito sullo standard output
         if(p) {
-            if(result == 0) {
+            if(retVal == 0) {
                 // Operazione terminata con successo
                 printf("Il file %s è stato letto dal server con successo (%lu bytes letti).\n", file, buf_size);
             } else {
@@ -816,7 +1026,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
         }
         
         // Salva nella cartella il file se dirname != NULL
-        if(dirname != NULL && result == 0) {
+        if(dirname != NULL && retVal == 0) {
             unsigned long dirname_len = strlen(dirname);
             unsigned long file_len = strlen(file);
             
@@ -887,7 +1097,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
         }
         
         // Libera dalla memoria buf e attende time secondi prima di eseguire la prossima operazione
-        if(result == 0) {
+        if(retVal == 0) {
             free(buf);
             buf = NULL;
         }
@@ -900,7 +1110,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
 static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
     time = time/1000;
     long int n = 0;
-    int result;
+    int retVal;
     
     if(arg != NULL) {
         if(!isNumber(arg, &n) || n < 0 || n > INT_MAX) {
@@ -913,7 +1123,7 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
         }
     }
     
-    if((result = readNFiles((int) n, dirname)) != 0) {
+    if((retVal = readNFiles((int) n, dirname)) != 0) {
         switch(errno) {
             case EINVAL:
                 // Se dirname == NULL || dirname non è una directory
@@ -946,9 +1156,9 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
     
     // Stampa l'esito sullo standard output
     if(p) {
-        if(result >= 0) {
+        if(retVal >= 0) {
             // Operazione terminata con successo
-            printf("Sono stati scritti con successo %d file nella cartella %s.\n", result, dirname);
+            printf("Sono stati scritti con successo %d file nella cartella %s.\n", retVal, dirname);
         } else {
             // Operazione non terminata con successo
             printf("Non è stato possibile scrivere nessun file nella cartella %s.\n", dirname);
@@ -962,7 +1172,7 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
 static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
     time = time/1000;
     char* file = NULL;
-    int result;
+    int retVal;
     
     file = strtok(arg, ",");
     
@@ -987,7 +1197,7 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         }
         
         // Setta la lock
-        if((result = lockFile(file)) != 0) {
+        if((retVal = lockFile(file)) != 0) {
             switch(errno) {
                 case EINVAL:
                     // Se pathname == NULL
@@ -1028,7 +1238,7 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         
         // Stampa l'esito sullo standard output
         if(p) {
-            if(result == 0) {
+            if(retVal == 0) {
                 // Operazione terminata con successo
                 printf("Il flag O_LOCK è stato settato al file %s con successo.\n", file);
             } else {
@@ -1047,12 +1257,12 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
 static void unlock_opt(char* arg, unsigned int time, int p) {
     time = time/1000;
     char* file = NULL;
-    int result;
+    int retVal;
     
     file = strtok(arg, ",");
     
     do {
-        if((result = unlockFile(file)) != 0) {
+        if((retVal = unlockFile(file)) != 0) {
             switch(errno) {
                 case EINVAL:
                     // Se pathname == NULL
@@ -1097,7 +1307,7 @@ static void unlock_opt(char* arg, unsigned int time, int p) {
         
         // Stampa l'esito sullo standard output
         if(p) {
-            if(result == 0) {
+            if(retVal == 0) {
                 // Operazione terminata con successo
                 printf("Il flag O_LOCK è stato resettato sul file %s con successo.\n", file);
             } else {
@@ -1114,7 +1324,7 @@ static void unlock_opt(char* arg, unsigned int time, int p) {
 static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
     time = time/1000;
     char* file = NULL;
-    int result;
+    int retVal;
     
     file = strtok(arg, ",");
     
@@ -1144,7 +1354,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         }
         
         // Rimuove il file
-        if((result = removeFile(file)) != 0) {
+        if((retVal = removeFile(file)) != 0) {
             switch(errno) {
                 case EINVAL:
                     // Se pathname == NULL
@@ -1189,7 +1399,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         
         // Stampa l'esito sullo standard output
         if(p) {
-            if(result == 0) {
+            if(retVal == 0) {
                 // Operazione terminata con successo
                 printf("Il file %s è stato rimosso dal server con successo.\n", file);
             } else {
