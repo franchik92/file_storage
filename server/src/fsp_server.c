@@ -234,6 +234,8 @@ static int capacityMiss(void** data, size_t* data_len);
  * il numero di byte letti/scritti/rimossi.
  * Se restituiscono -1 (errore), allora il relativo comando non è stato eseguito e
  * i valori salvati in resp non sono significativi.
+ * Le funzioni append_cmd, openc_cmd, opencl_cmd e write_cmd restituiscono -2 se l'algoritmo di rimpiazzamento della cache
+ * (capacityMiss) ha riscontrato errori.
  */
 static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
@@ -1060,6 +1062,13 @@ static void* worker(void* arg) {
                 // Chiude immediatamente la connessione
                 closeConnection(client, "internal error");
                 continue;
+            } else if(ret_val == -2) {
+                // Errore capacity miss
+                if(kill(getpid(), SIGQUIT) != 0) {
+                    exit(EXIT_FAILURE);
+                }
+                closeConnection(client, "internal error");
+                continue;
             }
         }
         
@@ -1143,85 +1152,52 @@ static int capacityMiss(void** data, size_t* data_len) {
     
     pthread_mutex_lock(&files_mutex);
     
-    if(files_num <= config_file.files_max_num && storage_size <= config_file.storage_max_size) {
+    FSP_FILE file = files_queue->head;
+    
+    if(file == NULL || (files_num <= config_file.files_max_num && storage_size <= config_file.storage_max_size)) {
         pthread_mutex_unlock(&files_mutex);
         return 0;
     }
     
-    unsigned long int prev_storage_size = storage_size;
-    int n = 0;
-    size_t tot_size = 0;
-    
-    FSP_FILE file = files_queue->head;
-    
-    // Determina il numero di file da espellere e stima tot_size
-    while(files_num > config_file.files_max_num || storage_size > config_file.storage_max_size) {
-        if(file == NULL) {
-            files_num += n;
-            storage_size = prev_storage_size;
-            pthread_mutex_unlock(&files_mutex);
-            return -1;
-        }
-        files_num--;
-        storage_size -= file->size;
-        n++;
-        tot_size += file->size + strlen(file->pathname) + 32;
-        file = file->queue_next;
-    }
+    size_t tot_size = storage_size > config_file.storage_max_size ? (storage_size - config_file.storage_max_size) + 512 : file->size + strlen(file->pathname) + 32;
     
     // Alloca la memoria per *data
     if((*data = malloc(tot_size)) == NULL) {
-        files_num += n;
-        storage_size = prev_storage_size;
         pthread_mutex_unlock(&files_mutex);
         return -1;
     }
     
-    // Scrive in *data
+    char msg[512] = {0};
     long int wrote_bytes_tot = 0;
     long int wrote_bytes = 0;
-    file = files_queue->head;
-    wrote_bytes = fsp_parser_makeData(data, &tot_size, 0, n, file->pathname, file->size, file->data);
-    if(wrote_bytes < 0) {
-        files_num += n;
-        storage_size = prev_storage_size;
-        free(*data);
-        *data = NULL;
-        pthread_mutex_unlock(&files_mutex);
-        return -1;
-    }
-    wrote_bytes_tot += wrote_bytes;
-    for(int i = 1; i < n; i++) {
-        file = file->queue_next;
-        wrote_bytes = fsp_parser_makeData(data, &tot_size, wrote_bytes, 0, file->pathname, file->size, file->data);
+    while(files_num > config_file.files_max_num || storage_size > config_file.storage_max_size) {
+        // Scrive in *data
+        file = fsp_files_queue_dequeue(files_queue);
+        
+        wrote_bytes = fsp_parser_makeData(data, &tot_size, wrote_bytes_tot, file->pathname, file->size, file->data);
         if(wrote_bytes < 0) {
-            files_num += n;
-            storage_size = prev_storage_size;
             free(*data);
             *data = NULL;
             pthread_mutex_unlock(&files_mutex);
             return -1;
         }
         wrote_bytes_tot += wrote_bytes;
-    }
-    if(data_len != NULL) *data_len = wrote_bytes;
-    
-    // Messaggio per il file di log
-    time_t t = time(NULL);
-    struct tm* current_time = localtime(&t);
-    size_t msg_size = 64 + n*512;
-    // VLA
-    char msg[msg_size];
-    sprintf(msg, "%d:%d:%d CAPACITY_MISS: %d (%lu)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, n, prev_storage_size - storage_size);
-    // Rimuove i file
-    for(int i = 0; i < n; i++) {
-        file = fsp_files_queue_dequeue(files_queue);
         
         // Messaggio per il file di log
-        snprintf(msg + strlen(msg), 512, "REMOVED_FILE: %s (%lu)\n", file->pathname, file->size);
+        time_t t = time(NULL);
+        struct tm* current_time = localtime(&t);
+        snprintf(msg, 512, "%d:%d:%d CAPACITY_MISS: %s (%lu)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, file->pathname, file->size);
+        // Scrive nel file di log e su stdout
+        write(log_file, msg, strlen(msg));
+        write(1, msg, strlen(msg));
         
+        // Aggiorna il numero dei file e la dimensione dello spazio utilizzato dal server
+        files_num--;
+        storage_size -= file->size;
+        
+        // Rimuove il file
+        fsp_files_queue_remove(files_queue, file->pathname);
         if(file->links == 0) {
-            // Rimuove il file
             fsp_files_hash_table_delete(files, file->pathname);
             fsp_file_free(file);
         } else {
@@ -1230,14 +1206,11 @@ static int capacityMiss(void** data, size_t* data_len) {
             pthread_cond_broadcast(&lock_cmd_isNotLocked);
         }
     }
+    if(data_len != NULL) *data_len = wrote_bytes_tot;
     
     // Aggiorna la statistica
     capacity_misses++;
     pthread_mutex_unlock(&files_mutex);
-    
-    // Scrive nel file di log e su stdout
-    write(log_file, msg, strlen(msg));
-    write(1, msg, strlen(msg));
     
     return 0;
 }
@@ -1250,7 +1223,7 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
     resp->data = NULL;
     
     // Dati contenuti nel campo data
-    struct fsp_data parsed_data;
+    struct fsp_data* parsed_data;
     
     // Legge i dati
     switch (fsp_parser_parseData(req->data_len, req->data, &parsed_data)) {
@@ -1271,14 +1244,14 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
             // Successo
             break;
     }
-    if(parsed_data.n != 1) {
-        fsp_parser_freeData(&parsed_data);
+    if(parsed_data->next != NULL) {
+        fsp_parser_freeData(parsed_data);
         resp->code = 501;
         strncpy(resp->description, "Syntax error, message unrecognised.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    bytes = parsed_data.sizes[0];
+    bytes = parsed_data->size;
     
     FSP_FILE file;
     int notOpened = 0;
@@ -1291,35 +1264,28 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
     // Se il file esiste ma deve essere rimosso, allora non esegue il comando
     if(file != NULL && file->remove) file = NULL;
     if(file != NULL) {
-        if(file->size + parsed_data.sizes[0] <= config_file.storage_max_size) {
+        if(file->size + parsed_data->size <= config_file.storage_max_size) {
             if(fsp_files_list_contains(client->openedFiles, req->arg) && file->data != NULL) {
                 // Il file è stato aperto dal client senza flag O_CREATE
                 if(file->locked < 0 || file->locked == client->sfd) {
                     // Il client detiene la lock sul file
                     void* _data = file->data;
-                    if((file->data = realloc(file->data, file->size + parsed_data.sizes[0])) == NULL) {
+                    if((file->data = realloc(file->data, file->size + parsed_data->size)) == NULL) {
                         file->data = _data;
-                        fsp_parser_freeData(&parsed_data);
+                        fsp_parser_freeData(parsed_data);
                         pthread_mutex_unlock(&files_mutex);
                         return -1;
                     }
-                    memcpy((file->data) + file->size, parsed_data.data[0], parsed_data.sizes[0]);
-                    file->size += parsed_data.sizes[0];
-                    unsigned long int prev_storage_size = storage_size;
-                    storage_size += parsed_data.sizes[0];
+                    memcpy((file->data) + file->size, parsed_data->data, parsed_data->size);
+                    file->size += parsed_data->size;
+                    storage_size += parsed_data->size;
                     
                     // Espelle i file dalla memoria se necessario
                     if(storage_size > config_file.storage_max_size) {
                         if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
-                            _data = file->data;
-                            if((file->data = realloc(file->data, file->size - parsed_data.sizes[0])) == NULL) {
-                                file->data = _data;
-                            }
-                            file->size -= parsed_data.sizes[0];
-                            fsp_parser_freeData(&parsed_data);
-                            storage_size = prev_storage_size;
+                            fsp_parser_freeData(parsed_data);
                             pthread_mutex_unlock(&files_mutex);
-                            return -1;
+                            return -2;
                         }
                     }
                     
@@ -1337,7 +1303,7 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
     }
     pthread_mutex_unlock(&files_mutex);
     
-    fsp_parser_freeData(&parsed_data);
+    fsp_parser_freeData(parsed_data);
     
     if(file == NULL) {
         // File inesistente o file da rimuovere
@@ -1347,7 +1313,7 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
         return 0;
     }
     if(noMemory) {
-        fsp_parser_freeData(&parsed_data);
+        // File troppo grande
         resp->code = 552;
         strncpy(resp->description, "Requested file action aborted. Exceeded storage allocation.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
@@ -1560,22 +1526,21 @@ static int openc_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
             pthread_mutex_unlock(&files_mutex);
             return -1;
         }
-        files_num++;
-        
-        // Espelle un file dalla memoria se necessario
-        if(files_num > config_file.files_max_num) {
-            if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
-                fsp_file_free(file);
-                files_num--;
-                pthread_mutex_unlock(&files_mutex);
-                return -1;
-            }
-        }
         
         // Aggiunge il file alla tabella hash, alla coda e alla lista dei file aperti dal client
         fsp_files_hash_table_insert(files, file);
         fsp_files_queue_enqueue(files_queue, file);
         fsp_files_list_add(&(client->openedFiles), file);
+        
+        files_num++;
+        
+        // Espelle un file dalla memoria se necessario
+        if(files_num > config_file.files_max_num) {
+            if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
+                pthread_mutex_unlock(&files_mutex);
+                return -2;
+            }
+        }
         
         // Aggiorna la statistica
         if(files_num > files_max_reached_num) files_max_reached_num = files_num;
@@ -1637,22 +1602,21 @@ static int opencl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_r
             pthread_mutex_unlock(&files_mutex);
             return -1;
         }
-        files_num++;
-        
-        // Espelle un file dalla memoria se necessario
-        if(files_num > config_file.files_max_num) {
-            if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
-                fsp_file_free(file);
-                files_num--;
-                pthread_mutex_unlock(&files_mutex);
-                return -1;
-            }
-        }
         
         // Aggiunge il file alla tabella hash, alla coda e alla lista dei file aperti dal client
         fsp_files_hash_table_insert(files, file);
         fsp_files_queue_enqueue(files_queue, file);
         fsp_files_list_add(&(client->openedFiles), file);
+        
+        files_num++;
+        
+        // Espelle un file dalla memoria se necessario
+        if(files_num > config_file.files_max_num) {
+            if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
+                pthread_mutex_unlock(&files_mutex);
+                return -2;
+            }
+        }
         
         // Aggiorna la statistica
         if(files_num > files_max_reached_num) files_max_reached_num = files_num;
@@ -1773,7 +1737,7 @@ static unsigned long int read_cmd(CLIENT client, const struct fsp_request* req, 
                     return -1;
                 }
                 long int wrote_bytes = 0;
-                wrote_bytes = fsp_parser_makeData(&(resp->data), &buf_size, 0, 1, file->pathname, file->size, file->data);
+                wrote_bytes = fsp_parser_makeData(&(resp->data), &buf_size, 0, file->pathname, file->size, file->data);
                 if(wrote_bytes < 0) {
                     free(resp->data);
                     pthread_mutex_unlock(&files_mutex);
@@ -1834,75 +1798,50 @@ static unsigned long int readn_cmd(CLIENT client, const struct fsp_request* req,
     }
     
     pthread_mutex_lock(&files_mutex);
-    unsigned int availableFiles = 0;
-    size_t buf_size = 0;
+    if(n <= 0) n = files->files_num;
     
-    // Calcola il numero di file disponibili
-    struct fsp_files_hash_table_iterator* iterator = fsp_files_hash_table_getIterator(files);
-    FSP_FILE file = fsp_files_hash_table_getNext(iterator);
+    // Stima la dimensione del buffer
+    size_t buf_size = (storage_size*n)/(files->files_num) + n*256;
     
-    while((file = fsp_files_hash_table_getNext(iterator)) != NULL || n > 0) {
-        // Non legge i file da rimuovere e i file in stato locked di cui il client non detiene la lock
-        if(file->remove || (file->locked >=0 && file->locked != client->sfd)) {
-            continue;
-        }
-        availableFiles++;
-        buf_size += file->size;
-        if(n > 0) n--;
+    // Alloca la memoria
+    if((resp->data = malloc(buf_size)) == NULL) {
+        pthread_mutex_unlock(&files_mutex);
+        return -1;
     }
-    free(iterator);
-    bytes = buf_size;
     
-    if(availableFiles > 0) {
-        
-        // Stima la dimensione del buffer e alloca la memoria
-        buf_size += availableFiles*(256 + 32);
-        if((resp->data = malloc(buf_size)) == NULL) {
-            pthread_mutex_unlock(&files_mutex);
-            return -1;
-        }
-        
-        // Prepara l'iteratore
-        iterator = fsp_files_hash_table_getIterator(files);
-        FSP_FILE file = fsp_files_hash_table_getNext(iterator);
+    // Prepara l'iteratore
+    struct fsp_files_hash_table_iterator* iterator = fsp_files_hash_table_getIterator(files);
+    FSP_FILE file = NULL;
+    
+    // Legge i file
+    long int wrote_bytes = 0;
+    long int wrote_bytes_tot = 0;
+    while(n > 0) {
         
         // Non legge un file da rimuovere o un file in stato locked di cui il client non detiene la lock
-        while(file->remove || (file->locked >=0 && file->locked != client->sfd)) {
-            if((file = fsp_files_hash_table_getNext(iterator)) == NULL) break;
+        while((file = fsp_files_hash_table_getNext(iterator)) != NULL) {
+            if(file->remove || (file->locked >=0 && file->locked != client->sfd)) {
+                continue;
+            }
+            break;
         }
+        if(file == NULL) break;
         
-        // Legge i file
-        long int wrote_bytes = 0;
-        long int wrote_bytes_tot = 0;
-        
-        wrote_bytes_tot = fsp_parser_makeData(&(resp->data), &buf_size, 0, availableFiles, file->pathname, file->size, file->data);
-        if(wrote_bytes_tot < 0) {
+        // Legge il file
+        wrote_bytes = fsp_parser_makeData(&(resp->data), &buf_size, wrote_bytes_tot, file->pathname, file->size, file->data);
+        if(wrote_bytes < 0) {
             free(resp->data);
             resp->data = NULL;
             free(iterator);
             pthread_mutex_unlock(&files_mutex);
             return -1;
         }
-        
-        while((file = fsp_files_hash_table_getNext(iterator)) != NULL || n > 0) {
-            // Non legge i file da rimuovere e i file in stato locked di cui il client non detiene la lock
-            if(file->remove || (file->locked >=0 && file->locked != client->sfd)) continue;
-            
-            wrote_bytes = fsp_parser_makeData(&(resp->data), &buf_size, wrote_bytes_tot, 0, file->pathname, file->size, file->data);
-            if(wrote_bytes < 0) {
-                free(resp->data);
-                resp->data = NULL;
-                free(iterator);
-                pthread_mutex_unlock(&files_mutex);
-                return -1;
-            }
-            wrote_bytes_tot += wrote_bytes;
-            if(n > 0) n--;
-        }
-        
-        resp->data_len = wrote_bytes_tot;
-        free(iterator);
+        wrote_bytes_tot += wrote_bytes;
+        n--;
     }
+    resp->data_len = wrote_bytes_tot;
+    bytes = wrote_bytes_tot;
+    free(iterator);
     pthread_mutex_unlock(&files_mutex);
     
     resp->code = 200;
@@ -1992,10 +1931,10 @@ static int unlock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_r
         if(!fsp_files_list_contains(client->openedFiles, req->arg)) {
             // Il file non è stato aperto dal client
             notOpened = 1;
-        } else if(file->locked >= 0 && file->locked != client->sfd) {
-            // Il file ha la lock settata da un altro client
+        } else if(file->locked != client->sfd) {
+            // Il client non detiene la lock sul file
             notLocked = 1;
-        } else if(file->locked >= 0){
+        } else {
             // Rilascia la lock
             file->locked = -1;
             pthread_cond_broadcast(&lock_cmd_isNotLocked);
@@ -2039,7 +1978,7 @@ static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req,
     resp->data = NULL;
     
     // Dati contenuti nel campo data
-    struct fsp_data parsed_data;
+    struct fsp_data* parsed_data;
     
     // Legge i dati
     switch (fsp_parser_parseData(req->data_len, req->data, &parsed_data)) {
@@ -2060,21 +1999,21 @@ static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req,
             // Successo
             break;
     }
-    if(parsed_data.n != 1) {
-        fsp_parser_freeData(&parsed_data);
+    if(parsed_data->next != NULL) {
+        fsp_parser_freeData(parsed_data);
         resp->code = 501;
         strncpy(resp->description, "Syntax error, message unrecognised.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(parsed_data.sizes[0] > config_file.storage_max_size) {
-        fsp_parser_freeData(&parsed_data);
+    if(parsed_data->size > config_file.storage_max_size) {
+        fsp_parser_freeData(parsed_data);
         resp->code = 552;
         strncpy(resp->description, "Requested file action aborted. Exceeded storage allocation.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    bytes = parsed_data.sizes[0];
+    bytes = parsed_data->size;
     
     FSP_FILE file;
     int notOpened = 0;
@@ -2090,26 +2029,21 @@ static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req,
             // Il file è stato aperto dal client con flag O_CREATE
             if(file->locked >= 0 && file->locked == client->sfd) {
                 // Il client detiene la lock sul file
-                if((file->data = malloc(parsed_data.sizes[0])) == NULL) {
-                    fsp_parser_freeData(&parsed_data);
+                if((file->data = malloc(parsed_data->size)) == NULL) {
+                    fsp_parser_freeData(parsed_data);
                     pthread_mutex_unlock(&files_mutex);
                     return -1;
                 }
-                memcpy(file->data, parsed_data.data[0], parsed_data.sizes[0]);
-                file->size = parsed_data.sizes[0];
-                unsigned long int prev_storage_size = storage_size;
-                storage_size += parsed_data.sizes[0];
+                memcpy(file->data, parsed_data->data, parsed_data->size);
+                file->size = parsed_data->size;
+                storage_size += parsed_data->size;
                 
                 // Espelle i file dalla memoria se necessario
                 if(storage_size > config_file.storage_max_size) {
                     if(capacityMiss(&(resp->data), &(resp->data_len)) != 0) {
-                        fsp_parser_freeData(&parsed_data);
-                        free(file->data);
-                        file->data = NULL;
-                        file->size = 0;
-                        storage_size = prev_storage_size;
+                        fsp_parser_freeData(parsed_data);
                         pthread_mutex_unlock(&files_mutex);
-                        return -1;
+                        return -2;
                     }
                 }
                 
@@ -2124,7 +2058,7 @@ static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req,
     }
     pthread_mutex_unlock(&files_mutex);
     
-    fsp_parser_freeData(&parsed_data);
+    fsp_parser_freeData(parsed_data);
     
     if(file == NULL) {
         // File inesistente o file da rimuovere

@@ -74,13 +74,18 @@ int closeConnection(const char* sockname);
  * scrivere il file pathname è il processo che lo ha aperto.
  * Specificare 0 (O_DEFAULT) come flags per il comportamento di default: apertura di un file esistente in
  * lettura e scrittura senza la modalità locked.
+ * Se tra i flag è presente O_CREATE e dirname è diverso da NULL, il file eventualmente spedito
+ * dal server perchè espulso dalla cache per far posto al file pathname sarà scritto in
+ * dirname.
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *
- *         EINVAL: se pathname == NULL || (flags != O_DEFAULT && flags != O_CREATE && flags != O_LOCK && flags != O_CREATE | O_LOCK).
+ *         EINVAL: se pathname == NULL || (flags != O_DEFAULT && flags != O_CREATE && flags != O_LOCK && flags != O_CREATE | O_LOCK) ||
+ *                 dirname non è una directory (se dirname != NULL).
  *         ENOTCONN: se non è stata aperta la connessione con openConnection().
  *         ENOBUFS: se la memoria per il buffer non è sufficiente.
- *         EIO: se ci sono stati errori di lettura e scrittura su socket.
+ *         EIO: se ci sono stati errori di lettura e scrittura su socket o
+ *              errori relativi alla scrittura dei file in dirname.
  *         ECONNABORTED: se il servizio non è disponibile (codice di risposta fsp 421) e la connessione è stata chiusa.
  *         EBADMSG: se il messaggio di richiesta fsp contiene errori sintattici (codice di risposta fsp 501), o
  *                  li contiene il messaggio di risposta fsp (anche in caso di codice di risposta fsp non riconosciuto/inatteso).
@@ -91,7 +96,7 @@ int closeConnection(const char* sockname);
  *         EEXIST: se viene passato il flag O_CREATE ed il file pathname esiste già memorizzato nel server (codice di risposta fsp 555).
  *         ECANCELED: se non è stato possibile eseguire l'operazione (codice di risposta fsp 556).
  */
-int openFile(const char* pathname, int flags);
+int openFile(const char* pathname, int flags, const char* dirname);
 
 /**
  * \brief Legge tutto il contenuto del file pathname dal server.
@@ -143,7 +148,7 @@ int readNFiles(int N, const char* dirname);
  *
  * Ritorna successo solo se la precedente operazione, terminata con successo, è stata
  * openFile(pathname, O_CREATE| O_LOCK). Se dirname è diverso da NULL, il file eventualmente spedito
- * dal server perchè espulso dalla cache per far posto al file pathname dovrà essere scritto in
+ * dal server perchè espulso dalla cache per far posto al file pathname sarà scritto in
  * dirname.
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
@@ -169,7 +174,7 @@ int writeFile(const char* pathname, const char* dirname);
  *
  * L’operazione di append nel file è garantita essere atomica dal file server. Se dirname è diverso
  * da NULL, il file eventualmente spedito dal server perchè espulso dalla cache per far posto ai
- * nuovi dati di pathname dovrà essere scritto in dirname.
+ * nuovi dati di pathname sarà scritto in dirname.
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *

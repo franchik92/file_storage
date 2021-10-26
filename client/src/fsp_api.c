@@ -64,7 +64,7 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
     
     struct timespec ts;
     ts.tv_sec = msec/1000;
-    ts.tv_nsec = msec%1000*1000000;
+    ts.tv_nsec = (msec%1000)*1000000;
     
     struct sockaddr_un sa;
     sa.sun_family = AF_UNIX;
@@ -155,10 +155,24 @@ int closeConnection(const char* sockname) {
     return 0;
 }
 
-int openFile(const char* pathname, int flags) {
+int openFile(const char* pathname, int flags, const char* dirname) {
     if(pathname == NULL) {
         errno = EINVAL;
         return -1;
+    }
+    if(dirname != NULL) {
+        // Controlla se dirname è una directory
+        struct stat info;
+        if(stat(dirname, &info) == 0) {
+            if(!S_ISDIR(info.st_mode)) {
+                errno = EINVAL;
+                return -1;
+            }
+        } else {
+            // Errore stat
+            errno = EINVAL;
+            return -1;
+        }
     }
     
     enum fsp_command cmd;
@@ -193,6 +207,10 @@ int openFile(const char* pathname, int flags) {
         return -1;
     }
     
+    if(resp.data_len > 0 && dirname != NULL) {
+        return saveData(dirname, resp.data_len, resp.data) >= 0 ? 0 : -1;
+    }
+    
     return 0;
 }
 
@@ -216,7 +234,7 @@ int readFile(const char* pathname, void** buf, size_t* size) {
     }
     
     // Legge i dati
-    struct fsp_data parsed_data;
+    struct fsp_data* parsed_data = NULL;
     switch (fsp_parser_parseData(resp.data_len, resp.data, &parsed_data)) {
         case -1:
             // data_len <= 0 || data == NULL || parsed_data == NULL
@@ -234,21 +252,21 @@ int readFile(const char* pathname, void** buf, size_t* size) {
             // Successo
             break;
     }
-    if(parsed_data.n == 0) {
-        fsp_parser_freeData(&parsed_data);
+    if(parsed_data->next != NULL) {
+        fsp_parser_freeData(parsed_data);
         errno = EBADMSG;
         return -1;
     }
     
-    if((*buf = malloc(parsed_data.sizes[0])) == NULL) {
-        fsp_parser_freeData(&parsed_data);
+    if((*buf = malloc(parsed_data->size)) == NULL) {
+        fsp_parser_freeData(parsed_data);
         errno = ENOBUFS;
         return -1;
     }
-    memcpy(*buf, parsed_data.data[0], parsed_data.sizes[0]);
-    *size = parsed_data.sizes[0];
+    memcpy(*buf, parsed_data->data, parsed_data->size);
+    *size = parsed_data->size;
     
-    fsp_parser_freeData(&parsed_data);
+    fsp_parser_freeData(parsed_data);
     
     return 0;
 }
@@ -258,7 +276,6 @@ int readNFiles(int N, const char* dirname) {
         errno = EINVAL;
         return -1;
     }
-    
     // Controlla se dirname è una directory
     struct stat info;
     if(stat(dirname, &info) == 0) {
@@ -284,6 +301,7 @@ int readNFiles(int N, const char* dirname) {
         if(errno == ENOENT || errno == ENOMEM || errno == EPERM || errno == EEXIST || errno == ECANCELED) errno = EBADMSG;
         return -1;
     }
+    
     if(resp.code != 200) {
         errno = EBADMSG;
         return -1;
@@ -301,6 +319,20 @@ int writeFile(const char* pathname, const char* dirname) {
     if(pathname == NULL) {
         errno = EINVAL;
         return -1;
+    }
+    if(dirname != NULL) {
+        // Controlla se dirname è una directory
+        struct stat info;
+        if(stat(dirname, &info) == 0) {
+            if(!S_ISDIR(info.st_mode)) {
+                errno = EINVAL;
+                return -1;
+            }
+        } else {
+            // Errore stat
+            errno = EINVAL;
+            return -1;
+        }
     }
     
     FILE* file;
@@ -348,13 +380,9 @@ int writeFile(const char* pathname, const char* dirname) {
         return -1;
     }
     long int bytes;
-    switch(bytes = fsp_parser_makeData(&data_buf, &data_buf_size, 0, 1, pathname, buf_size, buf)) {
+    switch(bytes = fsp_parser_makeData(&data_buf, &data_buf_size, 0, pathname, buf_size, buf)) {
         case -1:
             // data_buf_size > FSP_PARSER_BUF_MAX_SIZE
-            free(buf);
-            free(data_buf);
-            errno = ENOBUFS;
-            return -1;
         case -2:
             // Non è stato possibile riallocare la memoria per *buf
             free(buf);
@@ -421,12 +449,9 @@ int appendToFile(const char* pathname, void* buf, size_t size, const char* dirna
         return -1;
     }
     long int bytes;
-    switch(bytes = fsp_parser_makeData(&data_buf, &data_buf_size, 0, 1, pathname, size, buf)) {
+    switch(bytes = fsp_parser_makeData(&data_buf, &data_buf_size, 0, pathname, size, buf)) {
         case -1:
             // data_buf_size > FSP_PARSER_BUF_MAX_SIZE
-            free(data_buf);
-            errno = ENOBUFS;
-            return -1;
         case -2:
             // Non è stato possibile riallocare la memoria per *buf
             free(data_buf);
@@ -676,7 +701,7 @@ static int receiveFspResp(struct fsp_response* resp) {
 
 static int saveData(const char* dirname, size_t data_len, void* data) {
     // Legge i dati
-    struct fsp_data parsed_data;
+    struct fsp_data* parsed_data = NULL;
     switch (fsp_parser_parseData(data_len, data, &parsed_data)) {
         case -1:
             // data_len <= 0 || data == NULL || parsed_data == NULL
@@ -694,16 +719,14 @@ static int saveData(const char* dirname, size_t data_len, void* data) {
             // Successo
             break;
     }
-    if(parsed_data.n == 0) {
-        fsp_parser_freeData(&parsed_data);
-        return 0;
-    }
     
     // Salva in dirname i file
-    int data_num = parsed_data.n;
-    for(int i = 0; i < data_num; i++) {
+    struct fsp_data* _parsed_data = parsed_data;
+    int data_num = 0;
+    
+    while(_parsed_data != NULL) {
         FILE* file;
-        char* pathname = parsed_data.pathnames[i];
+        char* pathname = _parsed_data->pathname;
         unsigned int dirname_len = (unsigned int) strlen(dirname);
         unsigned int pathname_len = (unsigned int) strlen(pathname);
         
@@ -725,7 +748,7 @@ static int saveData(const char* dirname, size_t data_len, void* data) {
         // Concatena il path della directory con il nuovo nome del file
         char* filename;
         if((filename = calloc(dirname_len+pathname_len+1, sizeof(char))) == NULL) {
-            fsp_parser_freeData(&parsed_data);
+            fsp_parser_freeData(parsed_data);
             errno = ENOBUFS;
             return -1;
         }
@@ -735,29 +758,32 @@ static int saveData(const char* dirname, size_t data_len, void* data) {
         
         if((file = fopen(filename, "wb")) != NULL) {
             size_t bytes;
-            bytes = fwrite(parsed_data.data[i], 1, parsed_data.sizes[i], file);
-            if(bytes != parsed_data.sizes[i]) {
-                fsp_parser_freeData(&parsed_data);
+            bytes = fwrite(_parsed_data->data, 1, _parsed_data->size, file);
+            if(bytes != _parsed_data->size) {
+                fsp_parser_freeData(parsed_data);
                 fclose(file);
                 free(filename);
                 errno = EIO;
                 return -1;
             }
         } else {
-            fsp_parser_freeData(&parsed_data);
+            fsp_parser_freeData(parsed_data);
             free(filename);
             errno = EIO;
             return -1;
         }
         if(fclose(file) == EOF) {
-            fsp_parser_freeData(&parsed_data);
+            fsp_parser_freeData(parsed_data);
             free(filename);
             errno = EIO;
             return -1;
         }
         free(filename);
+        
+        data_num++;
+        _parsed_data = _parsed_data->next;
     }
-    fsp_parser_freeData(&parsed_data);
+    fsp_parser_freeData(parsed_data);
     
     return data_num;
 }

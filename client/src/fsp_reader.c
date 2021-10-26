@@ -26,7 +26,7 @@ int fsp_reader_readRequest(int sfd, void** buf, size_t* size, struct fsp_request
     
     while((ret_val = read(sfd, _buf+bytes, len)) > 0) {
         bytes += ret_val;
-        len -= bytes;
+        len -= ret_val;
         
         // Controlla se il messaggio termina con "\r\n"
         if(bytes >= 2 && _buf[bytes-2] == '\r' && _buf[bytes-1] == '\n') {
@@ -88,7 +88,7 @@ int fsp_reader_readResponse(int sfd, void** buf, size_t* size, struct fsp_respon
     
     while((ret_val = read(sfd, _buf+bytes, len)) > 0) {
         bytes += ret_val;
-        len -= bytes;
+        len -= ret_val;
         
         // Controlla se il messaggio termina con "\r\n"
         if(bytes >= 2 && _buf[bytes-2] == '\r' && _buf[bytes-1] == '\n') {

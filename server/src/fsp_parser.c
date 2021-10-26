@@ -130,7 +130,7 @@ int fsp_parser_parseRequest(void* buf, size_t size, struct fsp_request* req) {
     return 0;
 }
 
-long int fsp_parser_makeRequest(void** buf, size_t* size, enum fsp_command cmd, const char* arg, size_t data_len, const void* data) {
+long int fsp_parser_makeRequest(void** buf, size_t* size, enum fsp_command cmd, const char* arg, size_t data_len, void* data) {
     if(buf == NULL || *buf == NULL || size == NULL || data_len < 0 || (data_len > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE) {
         return -1;
     }
@@ -167,6 +167,7 @@ long int fsp_parser_makeRequest(void** buf, size_t* size, enum fsp_command cmd, 
             break;
         case READN:
             _cmd = "READN";
+            break;
         case REMOVE:
             _cmd = "REMOVE";
             break;
@@ -322,7 +323,7 @@ int fsp_parser_parseResponse(void* buf, size_t size, struct fsp_response* resp) 
     return 0;
 }
 
-long int fsp_parser_makeResponse(void** buf, size_t* size, int code, const char* description, size_t data_len, const void* data) {
+long int fsp_parser_makeResponse(void** buf, size_t* size, int code, const char* description, size_t data_len, void* data) {
     if(buf == NULL || *buf == NULL || size == NULL || data_len < 0 || (data_len > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE) {
         return -1;
     }
@@ -377,52 +378,35 @@ long int fsp_parser_makeResponse(void** buf, size_t* size, int code, const char*
     return tot_len;
 }
 
-int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data* parsed_data) {
+int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data** parsed_data) {
     if(data_len <= 0 || data == NULL || parsed_data == NULL) {
         return -1;
     }
     
+    *parsed_data = NULL;
+    
     char* buf_start = (char*) data;
     char *start, *end;
     
-    // Legge il numero dei dati
     start = buf_start;
     end = start;
-    while(end - buf_start < data_len && *end != ' ') end++;
-    if(*end == ' ') {
-        *end = '\0';
-        long int n;
-        if(!isNumber(start, &n) || n <= 0) {
-            return -3;
-        }
-        parsed_data->n = (int) n;
-    } else {
-        return -2;
-    }
     
-    if((parsed_data->pathnames = malloc(sizeof(char*)*parsed_data->n)) == NULL) return -4;
-    if((parsed_data->sizes = malloc(sizeof(size_t)*parsed_data->n)) == NULL) {
-        free(parsed_data->pathnames);
+    // Crea il primo nodo della lista
+    if((*parsed_data = malloc(sizeof(struct fsp_data))) == NULL) {
         return -4;
     }
-    if((parsed_data->data = malloc(sizeof(void*)*parsed_data->n)) == NULL) {
-        free(parsed_data->pathnames);
-        free(parsed_data->sizes);
-        return -4;
-    }
+    struct fsp_data* _parsed_data = *parsed_data;
+    _parsed_data->next = NULL;
     
-    for(int i = 0; i < parsed_data->n; i++) {
+    while(end - buf_start != data_len) {
         // Legge il pathname
-        start = end + 1;
-        end = start;
         while(end - buf_start < data_len && *end != ' ') end++;
         if(*end == ' ') {
             *end = '\0';
-            (parsed_data->pathnames)[i] = start;
+            _parsed_data->pathname = start;
         } else {
-            free(parsed_data->pathnames);
-            free(parsed_data->sizes);
-            free(parsed_data->data);
+            fsp_parser_freeData(*parsed_data);
+            *parsed_data = NULL;
             return -2;
         }
         
@@ -434,71 +418,73 @@ int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data* parsed_da
             *end = '\0';
             long int size;
             if(!isNumber(start, &size) || size <= 0) {
-                free(parsed_data->pathnames);
-                free(parsed_data->sizes);
-                free(parsed_data->data);
+                fsp_parser_freeData(*parsed_data);
+                *parsed_data = NULL;
                 return -3;
             }
-            (parsed_data->sizes)[i] = (size_t) size;
+            _parsed_data->size = (size_t) size;
         } else {
-            free(parsed_data->pathnames);
-            free(parsed_data->sizes);
-            free(parsed_data->data);
+            fsp_parser_freeData(*parsed_data);
+            *parsed_data = NULL;
             return -2;
         }
         
         // Legge il dato
         start = end + 1;
-        end = start + (parsed_data->sizes)[i];
+        end = start + _parsed_data->size;
         if(end - buf_start < data_len) {
             if(*end == ' ') {
                 *end = '\0';
-                (parsed_data->data)[i] = (void*) start;
+                _parsed_data->data = (void*) start;
             } else {
-                free(parsed_data->pathnames);
-                free(parsed_data->sizes);
-                free(parsed_data->data);
+                fsp_parser_freeData(*parsed_data);
+                *parsed_data = NULL;
                 return -3;
             }
         } else {
-            free(parsed_data->pathnames);
-            free(parsed_data->sizes);
-            free(parsed_data->data);
+            fsp_parser_freeData(*parsed_data);
+            *parsed_data = NULL;
             return -2;
         }
-    }
-    
-    end++;
-    if((end - buf_start) != data_len) {
-        free(parsed_data->pathnames);
-        free(parsed_data->sizes);
-        free(parsed_data->data);
-        return -3;
+        
+        start = end + 1;
+        end = start;
+        if((end - buf_start) == data_len) {
+            break;
+        } else if((end - buf_start) > data_len) {
+            fsp_parser_freeData(*parsed_data);
+            *parsed_data = NULL;
+            return -3;
+        } else {
+            // Crea il prossimo nodo
+            struct fsp_data* newData = NULL;
+            if((newData = malloc(sizeof(struct fsp_data))) == NULL) {
+                fsp_parser_freeData(*parsed_data);
+                *parsed_data = NULL;
+                return -4;
+            }
+            newData->next = NULL;
+            _parsed_data->next = newData;
+            _parsed_data = newData;
+        }
     }
     
     return 0;
 }
 
-long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset, int n, const char* pathname, size_t data_size, const void* data) {
-    if(buf == NULL || *buf == NULL || size == NULL || offset < 0 || data_size < 0 || (data_size > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE) {
+long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset, const char* pathname, size_t data_size, void* data) {
+    if(buf == NULL || *buf == NULL || size == NULL || offset < 0 || pathname == NULL || data_size < 0 || (data_size > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE || data == NULL) {
         return -1;
-    }
-    
-    // n
-    char n_str[12];
-    if(n > 0) {
-        sprintf(n_str, "%d", n);
     }
     
     // data_size
     char data_size_str[12];
     sprintf(data_size_str, "%ld", data_size);
     
-    long int n_str_len, pathname_len = 0, data_size_str_len = 0, tot_len;
-    n_str_len = n > 0 ? strlen(n_str) : 0;
-    pathname_len = pathname == NULL ? 0 : strlen(pathname);
+    long int pathname_len, data_size_str_len, tot_len;
+    pathname_len = strlen(pathname);
     data_size_str_len = strlen(data_size_str);
-    tot_len = (n > 0 ? n_str_len + 1 : 0) + pathname_len + data_size_str_len + data_size + 3;
+    tot_len = pathname_len + data_size_str_len + data_size + 3;
     
     // In C99 sizeof(char) dovrebbe essere sempre pari a 1
     assert(sizeof(char) == 1);
@@ -519,13 +505,8 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
     // Scrive nel buffer
     char* _buf = (char*) (*buf);
     _buf += offset;
-    if(n > 0) {
-        memcpy(_buf, n_str, n_str_len);
-        _buf += n_str_len;
-        *_buf = ' ';
-        _buf++;
-    }
-    if(pathname != NULL) memcpy(_buf, pathname, pathname_len);
+    
+    memcpy(_buf, pathname, pathname_len);
     _buf += pathname_len;
     *_buf = ' ';
     _buf++;
@@ -533,7 +514,7 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
     _buf += data_size_str_len;
     *_buf = ' ';
     _buf++;
-    if(data != NULL) memcpy(_buf, data, data_size);
+    memcpy(_buf, data, data_size);
     _buf += data_size;
     *_buf = ' ';
     
@@ -541,8 +522,10 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
 }
 
 void fsp_parser_freeData(struct fsp_data* parsed_data) {
-    if(parsed_data == NULL) return;
-    free(parsed_data->pathnames);
-    free(parsed_data->sizes);
-    free(parsed_data->data);
+    struct fsp_data* _parsed_data;
+    while(parsed_data != NULL) {
+        _parsed_data = parsed_data->next;
+        free(parsed_data);
+        parsed_data = _parsed_data;
+    }
 }

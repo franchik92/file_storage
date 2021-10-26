@@ -36,27 +36,27 @@ static void printUsage(void);
 // -2 se non è stato possibile allocare memoria per il buffer (scritture in append),
 // -3 se non riesce a tornare alla working directory precedente alla sua chiamata,
 // 0 altrimenti.
-static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
+static int write_opt(char* arg, char* dirname, const struct timespec time, int p, OpenedFiles* opened_files);
 // Restituisce -1 se non è stato possibile aggiungere un file appena aperto nella tabella hash,
 // -2 se non è stato possibile allocare memoria per il buffer (scritture in append),
 // 0 altrimenti.
-static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
+static int write_opt_rec(long int* n, char* dirname, const struct timespec time, int p, OpenedFiles* opened_files);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
 // -2 se non è stato possibile allocare memoria per il buffer (scritture in append),
 // 0 altrimenti.
-static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
+static int Write_opt(char* arg, char* dirname, const struct timespec time, int p, OpenedFiles* opened_files);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
 // -2 se non è stato possibile allocare memoria,
 // 0 altrimenti.
-static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files);
-static void Read_opt(char* arg, char* dirname, unsigned int time, int p);
+static int read_opt(char* arg, char* dirname, const struct timespec time, int p, OpenedFiles* opened_files);
+static void Read_opt(char* arg, char* dirname, const struct timespec time, int p);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
 // 0 altrimenti.
-static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_files);
-static void unlock_opt(char* arg, unsigned int time, int p);
+static int lock_opt(char* arg, const struct timespec time, int p, OpenedFiles* opened_files);
+static void unlock_opt(char* arg, const struct timespec time, int p);
 // Restituisce -1 se non è stato possibile aggiungere il file appena aperto nella tabella hash,
 // 0 altrimenti.
-static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_files);
+static int cancel_opt(char* arg, const struct timespec time, int p, OpenedFiles* opened_files);
 
 // Funzioni per l'apertura e la chiusura dei file.
 // Viene fatta richiesta automatica di apertura di un file
@@ -74,7 +74,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* opened_f
 // Restituisce 0 in caso di successo,
 //             -1 se non riesce ad aprire il file
 // (pathname è il path assoluto del file da aprire)
-static int open_file(const char* pathname, int flags, int p);
+static int open_file(const char* pathname, int flags, const char* dirname, int p);
 static void close_file(const char* pathname);
 
 int main(int argc, char* argv[]) {
@@ -101,6 +101,7 @@ int main(int argc, char* argv[]) {
     }
     
     char c;
+    char* arg;
     while((c = getopt(argc, argv, ":w:W:D:r:R:d:t:l:u:c:")) != -1) {
         switch(c) {
             case 'w':
@@ -110,7 +111,13 @@ int main(int argc, char* argv[]) {
             case 'l':
             case 'u':
             case 'c':
-                if((req = fsp_client_request_queue_newRequest(optopt, optarg)) == NULL) {
+                if(optopt == 'R' && optarg[0] == '-') {
+                    optind--;
+                    arg = NULL;
+                } else {
+                    arg = optarg;
+                }
+                if((req = fsp_client_request_queue_newRequest(optopt, arg)) == NULL) {
                     // Errore: memoria insufficiente
                     fprintf(stderr, "Errore: memoria insufficiente.\n");
                     fsp_client_request_queue_freeAllRequests(&queue);
@@ -223,14 +230,18 @@ int main(int argc, char* argv[]) {
     // Esegue le richieste
     while((req = fsp_client_request_queue_dequeue(&queue)) != NULL) {
         long int time = -1;
-        if(req->time != NULL && (!isNumber(req->time, &time) || time < 0)) {
-            // L'argomento dell'opzione -t non è valido
-            fprintf(stderr, "Errore richiesta -%c: l'argomento dell'opzione -t non è valido.\n", req->opt);
-            fsp_client_request_queue_freeRequest(req);
-            continue;
+        if(req->time != NULL) {
+            if(!isNumber(req->time, &time) || time < 0) {
+                // L'argomento dell'opzione -t non è valido
+                fprintf(stderr, "Errore richiesta -%c: l'argomento dell'opzione -t non è valido.\n", req->opt);
+                fsp_client_request_queue_freeRequest(req);
+                continue;
+            }
         } else {
             time = 0;
         }
+        abstime.tv_sec = time/1000;
+        abstime.tv_nsec = (time%1000)*1000000;
         
         int retVal = 0;
         switch(req->opt) {
@@ -241,7 +252,7 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                switch (retVal = write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
+                switch (retVal = write_opt(req->arg, req->dirname, abstime, p, opened_files)) {
                     case -1:
                         fprintf(stderr, "Errore richiesta -w: impossibile aggiornare la tabella hash.\n");
                         break;
@@ -263,7 +274,7 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                switch (retVal = Write_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
+                switch (retVal = Write_opt(req->arg, req->dirname, abstime, p, opened_files)) {
                     case -1:
                         fprintf(stderr, "Errore richiesta -W: impossibile aggiornare la tabella hash.\n");
                         break;
@@ -281,7 +292,7 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                switch (retVal = read_opt(req->arg, req->dirname, (unsigned int) time, p, opened_files)) {
+                switch (retVal = read_opt(req->arg, req->dirname, abstime, p, opened_files)) {
                     case -1:
                         fprintf(stderr, "Errore richiesta -r: impossibile aggiornare la tabella hash.\n");
                         break;
@@ -300,26 +311,26 @@ int main(int argc, char* argv[]) {
                     if(time != 0) printf(" -t %lu", time);
                     printf("\n");
                 }
-                Read_opt(req->arg, req->dirname, (unsigned int) time, p);
+                Read_opt(req->arg, req->dirname, abstime, p);
                 break;
             case 'l':
                 if(p) printf("-l %s", req->arg);
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
-                retVal = lock_opt(req->arg, (unsigned int) time, p, opened_files);
+                retVal = lock_opt(req->arg, abstime, p, opened_files);
                 if(retVal != 0) fprintf(stderr, "Errore richiesta -l: impossibile aggiornare la tabella hash.\n");
                 break;
             case 'u':
                 if(p) printf("-u %s", req->arg);
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
-                unlock_opt(req->arg, (unsigned int) time, p);
+                unlock_opt(req->arg, abstime, p);
                 break;
             case 'c':
                 if(p) printf("-c %s", req->arg);
                 if(time != 0) printf(" -t %lu", time);
                 printf("\n");
-                retVal = cancel_opt(req->arg, (unsigned int) time, p, opened_files);
+                retVal = cancel_opt(req->arg, abstime, p, opened_files);
                 if(retVal != 0) fprintf(stderr, "Errore richiesta -c: impossibile aggiornare la tabella hash.\n");
                 break;
             default:
@@ -398,17 +409,16 @@ static void printUsage() {
     printf("\tcancel_req := -c file_1[,file_2,...] [-t time]\n");
 }
 
-static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files) {
-    time = time/1000;
+static int write_opt(char* arg, char* dirname, const struct timespec time, int p, OpenedFiles* opened_files) {
     char* dir_arg = arg;
     char* n_arg = NULL;
     long int n = -1;
     int retVal;
     
-    while(*arg != ',' || *arg != '\0') arg++;
+    while(*arg != ',' && *arg != '\0') arg++;
     if(*arg == ',') {
         *arg = '\0';
-        n_arg = arg++;
+        n_arg = ++arg;
         if(*n_arg == '\0') {
             fprintf(stderr, "Errore richiesta -w: valore n non specificato dopo la virgola.\n");
             if(p) {
@@ -427,6 +437,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
             return 0;
         }
     }
+    n = n == 0 ? -1 : n;
     
     // Controlla se dir_arg è una directory
     struct stat info;
@@ -475,7 +486,7 @@ static int write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
     return 0;
 }
 
-static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, OpenedFiles* opened_files) {
+static int write_opt_rec(long int* n, char* dirname, const struct timespec time, int p, OpenedFiles* opened_files) {
     if(*n == 0) {
         return 0;
     }
@@ -540,10 +551,10 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                 // Se il file non esiste ancora, allora lo apre con i flag O_CREATE | O_LOCK
                 int append = 0;
                 OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
-                if(opened_file != NULL || (open_file(filename, O_DEFAULT, 0) == 0)) {
+                if(opened_file != NULL || (open_file(filename, O_DEFAULT, NULL, 0) == 0)) {
                     // Scrive in append
                     append = 1;
-                } else if(open_file(filename, O_CREATE | O_LOCK, 1) != 0) {
+                } else if(open_file(filename, O_CREATE | O_LOCK, dirname, 1) != 0) {
                     // Apre il file
                     if(p) printf("Errore: scrittura del file %s sul server non eseguita (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
                     continue;
@@ -711,7 +722,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
                 // Aggiorna n
                 (*n)--;
                 // Attende time secondi prima di eseguire la prossima operazione
-                sleep(time);
+                nanosleep(&time, NULL);
             }
         } else {
             // Errore stat
@@ -728,8 +739,7 @@ static int write_opt_rec(long int* n, char* dirname, unsigned int time, int p, O
     return 0;
 }
 
-static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* opened_files) {
-    time = time/1000;
+static int Write_opt(char* arg, char* dirname, const struct timespec time, int p, OpenedFiles* opened_files) {
     char* file = NULL;
     char filename[FSP_CLIENT_FILE_MAX_LEN];
     int retVal;
@@ -762,10 +772,10 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         // Se il file non esiste ancora, allora lo apre con i flag O_CREATE | O_LOCK
         int append = 0;
         OpenedFile* opened_file = fsp_opened_files_hash_table_search(opened_files, filename);
-        if(opened_file != NULL || (open_file(filename, O_DEFAULT, 0) == 0)) {
+        if(opened_file != NULL || (open_file(filename, O_DEFAULT, NULL, 0) == 0)) {
             // Scrive in append
             append = 1;
-        } else if(open_file(filename, O_CREATE | O_LOCK, 1) != 0) {
+        } else if(open_file(filename, O_CREATE | O_LOCK, dirname, 1) != 0) {
             // Apre il file
             if(p) printf("Errore: scrittura del file %s sul server non eseguita (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
             if((file = strtok(NULL, ",")) != NULL) continue;
@@ -937,14 +947,13 @@ static int Write_opt(char* arg, char* dirname, unsigned int time, int p, OpenedF
         }
         
         // Attende time secondi prima di eseguire la prossima operazione
-        sleep(time);
+        nanosleep(&time, NULL);
     } while((file = strtok(NULL, ",")) != NULL);
     
     return 0;
 }
 
-static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFiles* files) {
-    time = time/1000;
+static int read_opt(char* arg, char* dirname, const struct timespec time, int p, OpenedFiles* files) {
     char* file = NULL;
     char* buf = NULL;
     size_t buf_size;
@@ -958,7 +967,7 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
         if(opened_file == NULL) {
             // Il file non è ancora stato aperto
             // Apre il file
-            if(open_file(file, O_DEFAULT, 1) != 0) {
+            if(open_file(file, O_DEFAULT, NULL, 1) != 0) {
                 if(p) printf("Errore: lettura del file %s dal server non eseguita (apertura del file non riuscita).\n", file);
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
@@ -1101,14 +1110,13 @@ static int read_opt(char* arg, char* dirname, unsigned int time, int p, OpenedFi
             free(buf);
             buf = NULL;
         }
-        sleep(time);
+        nanosleep(&time, NULL);
     } while((file = strtok(NULL, ",")) != NULL);
     
     return 0;
 }
 
-static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
-    time = time/1000;
+static void Read_opt(char* arg, char* dirname, const struct timespec time, int p) {
     long int n = 0;
     int retVal;
     
@@ -1166,11 +1174,10 @@ static void Read_opt(char* arg, char* dirname, unsigned int time, int p) {
     }
     
     // Attende time secondi prima di eseguire la prossima operazione
-    sleep(time);
+    nanosleep(&time, NULL);
 }
 
-static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
-    time = time/1000;
+static int lock_opt(char* arg, const struct timespec time, int p, OpenedFiles* files) {
     char* file = NULL;
     int retVal;
     
@@ -1182,7 +1189,7 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         if(opened_file == NULL) {
             // Il file non è ancora stato aperto
             // Apre il file
-            if(open_file(file, O_LOCK, 1) != 0) {
+            if(open_file(file, O_LOCK, NULL, 1) != 0) {
                 if(p) printf("Errore: non è stato possibile settare il flag O_LOCK al file %s durante la sua apertura.\n", file);
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
@@ -1248,14 +1255,13 @@ static int lock_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         }
         
         // Attende time secondi prima di eseguire la prossima operazione
-        sleep(time);
+        nanosleep(&time, NULL);
     } while((file = strtok(NULL, ",")) != NULL);
     
     return 0;
 }
 
-static void unlock_opt(char* arg, unsigned int time, int p) {
-    time = time/1000;
+static void unlock_opt(char* arg, const struct timespec time, int p) {
     char* file = NULL;
     int retVal;
     
@@ -1317,12 +1323,11 @@ static void unlock_opt(char* arg, unsigned int time, int p) {
         }
         
         // Attende time secondi prima di eseguire la prossima operazione
-        sleep(time);
+        nanosleep(&time, NULL);
     } while((file = strtok(NULL, ",")) != NULL);
 }
 
-static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
-    time = time/1000;
+static int cancel_opt(char* arg, const struct timespec time, int p, OpenedFiles* files) {
     char* file = NULL;
     int retVal;
     
@@ -1341,7 +1346,7 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         // Controlla se il file è ancora aperto o è stato appena chiuso
         if(opened_file == NULL) {
             // Apre il file
-            if(open_file(file, O_LOCK, 1) != 0) {
+            if(open_file(file, O_LOCK, NULL, 1) != 0) {
                 if(p) printf("Errore: non è stato possibile rimuovere dal server il file %s (apertura con flag O_LOCK non riuscita).\n", file);
                 if((file = strtok(NULL, ",")) != NULL) continue;
                 return 0;
@@ -1413,14 +1418,14 @@ static int cancel_opt(char* arg, unsigned int time, int p, OpenedFiles* files) {
         fsp_opened_files_hash_table_delete(files, file);
         
         // Attende time secondi prima di eseguire la prossima operazione
-        sleep(time);
+        nanosleep(&time, NULL);
     } while((file = strtok(NULL, ",")) != NULL);
     
     return 0;
 }
 
-static int open_file(const char* pathname, int flags, int p) {
-    if(openFile(pathname, flags) != 0) {
+static int open_file(const char* pathname, int flags, const char* dirname, int p) {
+    if(openFile(pathname, flags, dirname) != 0) {
         switch(errno) {
             case EINVAL:
                 // Se pathname == NULL || (flags != O_DEFAULT && flags != O_CREATE && flags != O_LOCK && flags != O_CREATE | O_LOCK)
