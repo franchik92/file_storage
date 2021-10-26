@@ -147,8 +147,8 @@ int readNFiles(int N, const char* dirname);
  * \brief Scrive tutto il file puntato da pathname nel file server.
  *
  * Ritorna successo solo se la precedente operazione, terminata con successo, è stata
- * openFile(pathname, O_CREATE| O_LOCK). Se dirname è diverso da NULL, il file eventualmente spedito
- * dal server perchè espulso dalla cache per far posto al file pathname sarà scritto in
+ * openFile(pathname, O_CREATE| O_LOCK). Se dirname è diverso da NULL, i file eventualmente spediti
+ * dal server perchè espulsi dalla cache per far posto al file pathname saranno scritti in
  * dirname.
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
@@ -173,8 +173,8 @@ int writeFile(const char* pathname, const char* dirname);
  * \brief Richiesta di scrivere in append al file pathname i size bytes contenuti nel buffer buf.
  *
  * L’operazione di append nel file è garantita essere atomica dal file server. Se dirname è diverso
- * da NULL, il file eventualmente spedito dal server perchè espulso dalla cache per far posto ai
- * nuovi dati di pathname sarà scritto in dirname.
+ * da NULL, i file eventualmente spediti dal server perchè espulsi dalla cache per far posto ai
+ * nuovi dati di pathname saranno scritti in dirname.
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *
