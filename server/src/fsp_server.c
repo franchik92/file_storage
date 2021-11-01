@@ -4,6 +4,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -31,13 +32,13 @@
 #define UNIX_PATH_MAX 104
 #endif
 
-// Nome del file di configurazione
-#define CONFIG_FILE "/Users/francesco/Desktop/test/config.txt"
 // Dimensione di defualt dei buffer usati dai client (4MB)
 #define FSP_CLIENT_DEF_BUF_SIZE 4194304
 // Dimensioni delle tabelle hash
 #define FSP_FILES_HASH_TABLE_SIZE 49157
 #define FSP_CLIENTS_HASH_TABLE_SIZE 97
+// Lunghezza di un messaggio di log
+#define LOG_FILE_MSG_LEN 512
 
 // File
 typedef struct fsp_file* FSP_FILE;
@@ -86,12 +87,13 @@ static struct {
     // Numero massimo di file che il server può mantenere in memoria
     unsigned int files_max_num;
     // Capacità massima di memoria del server in byte
+    // Di default è 67108864 (64 MB)
     unsigned long int storage_max_size;
     // Numero massimo di connessioni
     unsigned int max_conn;
     // Numero dei thread worker
     unsigned int worker_threads_num;
-} config_file = {"/tmp/file_storage.sk", "./log_file.txt", 1000, 64, 16, 4};
+} config_file = {"/tmp/file_storage.sk", "", 1000, 67108864, 16, 4};
 
 // Variabile che indica se il programma deve terminare (quit == 1) o meno (quit == 0)
 static volatile sig_atomic_t quit = 0;
@@ -167,13 +169,13 @@ static void closeConnection(CLIENT client, const char* error_descr);
 static void signalHandler(int signal);
 
 /**
- * \brief Esegue il parse del file di configurazione CONFIG_FILE_PATH e salva i suoi valori in config_file.
+ * \brief Esegue il parse del file di configurazione in path e salva i suoi valori in config_file.
  *
  * \return 0 in caso di successo,
- *         -1 se non è stato possibile aprire il file,
+ *         -1 path == NULL || se non è stato possibile aprire il file,
  *         -2 se il file contiene errori sintattici.
  */
-static int parseConfigFile(void);
+static int parseConfigFile(char* path);
 
 /**
  * \brief Stampa nel file di log l'esito del comando req->cmd richiesto dal client client->sfd ed eseguito dal thread thread_id.
@@ -262,21 +264,56 @@ static int unlock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_r
 static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req, struct fsp_response* resp, const size_t descr_max_len);
 
 int main(int argc, const char* argv[]) {
+    // Determina la home directory
+    char *home_dir = getenv("HOME");
+    if (home_dir == NULL) {
+        // Variabile HOME non settata
+        fprintf(stderr, "Errore: impossibile determinare la home directory\n");
+        return -1;
+    }
+    
+    // Path del file di configurazione
+    char config_file_path[UNIX_PATH_MAX];
+    strncpy(config_file_path, home_dir, UNIX_PATH_MAX);
+    if(UNIX_PATH_MAX-strlen(config_file_path) > 0) {
+        strcat(config_file_path, "/.file_storage/config.txt");
+    } else {
+        // Il path del file di configurazione è troppo lungo
+        fprintf(stderr, "Errore: il path del file di configurazione è troppo lungo\n");
+        return -1;
+    }
+    
+    // Path di default del file di log
+    strncpy(config_file.log_file_name, home_dir, UNIX_PATH_MAX);
+    if(UNIX_PATH_MAX-strlen(config_file.log_file_name) > 0) {
+        strcat(config_file.log_file_name, "/.file_storage/file_storage.log");
+    } else {
+        // Il path del file di log è troppo lungo
+        fprintf(stderr, "Errore: il path del file di log è troppo lungo\n");
+        return -1;
+    }
     
     // Esegue il parse del file di configurazione
-    switch(parseConfigFile()) {
+    switch(parseConfigFile(config_file_path)) {
         case -1:
-            // Impossibile aprire il file di configurazione
-            fprintf(stderr, "Errore: impossibile aprire il file di configurazione %s.\n", CONFIG_FILE);
-            return -1;
+            // Impossibile aprire il file di configurazione (continua l'esecuzione con i valori di default)
+            printf("File di configurazione %s non trovato.\n", config_file_path);
+            printf("Il programma verrà eseguito con i valori di default:\n");
+            printf("\tSOCKET_FILE_NAME=%s\n", config_file.socket_file_name);
+            printf("\tLOG_FILE_NAME=%s\n", config_file.log_file_name);
+            printf("\tFILES_MAX_NUM=%d\n", config_file.files_max_num);
+            printf("\tSTORAGE_MAX_SIZE=%lu\n", config_file.storage_max_size/1048576);
+            printf("\tMAX_CONN=%d\n", config_file.max_conn);
+            printf("\tWORKER_THREADS_NUM=%d\n", config_file.worker_threads_num);
+            break;
         case -2:
             // Errore di sintassi
-            fprintf(stderr, "Errore: il file di configurazione %s contiene errori sintattici.\n", CONFIG_FILE);
+            fprintf(stderr, "Errore: il file di configurazione %s contiene errori sintattici.\n", config_file_path);
             return -1;
         default:
+            printf("File di configurazione %s letto con successo.\n", config_file_path);
             break;
     }
-    printf("File di configurazione %s letto con successo.\n", CONFIG_FILE);
     
     // Apre il file di log in scrittura
     if((log_file = open(config_file.log_file_name, O_WRONLY | O_APPEND | O_CREAT, 0666)) == -1) {
@@ -288,8 +325,8 @@ int main(int argc, const char* argv[]) {
     // Scrive nel file di log e su stdout
     time_t t = time(NULL);
     struct tm* current_time = localtime(&t);
-    char msg[128] = {0};
-    sprintf(msg, "%d:%d:%d SERVER_PROCESS_STARTED\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
+    char msg[LOG_FILE_MSG_LEN] = {0};
+    snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d SERVER_PROCESS_STARTED\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
     write(log_file, msg, strlen(msg));
     write(1, msg, strlen(msg));
     
@@ -515,7 +552,7 @@ int main(int argc, const char* argv[]) {
                         // Scrive nel file di log e su stdout
                         t = time(NULL);
                         current_time = localtime(&t);
-                        sprintf(msg, "%d:%d:%d CONNECTION_OPENED: %d\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
+                        snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_OPENED: %d\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                         write(log_file, msg, strlen(msg));
                         write(1, msg, strlen(msg));
                         
@@ -526,7 +563,7 @@ int main(int argc, const char* argv[]) {
                             close(fd_c);
                             
                             // Scrive nel file di log e su stdout
-                            sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (internal error)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
+                            snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d (internal error)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                             write(log_file, msg, strlen(msg));
                             write(1, msg, strlen(msg));
                             
@@ -549,7 +586,7 @@ int main(int argc, const char* argv[]) {
                             close(fd_c);
                             
                             // Scrive nel file di log e su stdout
-                            sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (service not available)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
+                            snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d (service not available)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                             write(log_file, msg, strlen(msg));
                             write(1, msg, strlen(msg));
                         } else {
@@ -558,7 +595,7 @@ int main(int argc, const char* argv[]) {
                                 close(fd_c);
                                 
                                 // Scrive nel file di log e su stdout
-                                sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (internal error)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
+                                snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d (internal error)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                                 write(log_file, msg, strlen(msg));
                                 write(1, msg, strlen(msg));
                                 
@@ -614,10 +651,10 @@ int main(int argc, const char* argv[]) {
     
     // Stampa il sunto delle operazioni
     printf("--------------------------------\n");
-    printf("Numero di file massimo memorizzato nel server: %d\n", files_max_reached_num);
+    printf("Numero massimo di file memorizzati sul server: %d\n", files_max_reached_num);
     printf("Dimensione massima raggiunta dal file storage: %.2f MB\n", (float) storage_max_reached_size/1048576.0);
     printf("Numero di volte in cui la cache è stata rimpiazzata: %d\n", capacity_misses);
-    printf("File contenuti nello storage al momento della chiusura del server:\n");
+    printf("File contenuti nello storage al momento della chiusura del server: %d\n", files_num);
     fsp_files_hash_table_deleteAll(files, printAndRemoveFile);
     fsp_files_hash_table_free(files);
     files = NULL;
@@ -653,8 +690,8 @@ static void closeLogFile(void) {
     
     time_t t = time(NULL);
     struct tm* current_time = localtime(&t);
-    char msg[128] = {0};
-    sprintf(msg, "%d:%d:%d SERVER_PROCESS_TERMINATED\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
+    char msg[LOG_FILE_MSG_LEN] = {0};
+    snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d SERVER_PROCESS_TERMINATED\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
     write(log_file, msg, strlen(msg));
     write(1, msg, strlen(msg));
     close(log_file);
@@ -719,14 +756,13 @@ static void closeConnection(CLIENT client, const char* error_descr) {
     // Scrive nel file di log e su stdout
     time_t t = time(NULL);
     struct tm* current_time = localtime(&t);
-    const size_t msg_size = 256;
-    char msg[msg_size] = {0};
+    char msg[LOG_FILE_MSG_LEN] = {0};
     if(error_descr != NULL) {
-        sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (%s)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, client->sfd, error_descr);
+        snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d (%s)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, client->sfd, error_descr);
         write(log_file, msg, strlen(msg));
         write(1, msg, strlen(msg));
     } else {
-        sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, client->sfd);
+        snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, client->sfd);
         write(log_file, msg, strlen(msg));
         write(1, msg, strlen(msg));
     }
@@ -742,9 +778,9 @@ static void signalHandler(int signal) {
     }
 }
 
-static int parseConfigFile() {
+static int parseConfigFile(char* path) {
     FILE* file = NULL;
-    if((file = fopen(CONFIG_FILE, "r")) == NULL) {
+    if(path == NULL || ((file = fopen(path, "r")) == NULL)) {
         // File non aperto
         return -1;
     }
@@ -826,51 +862,49 @@ static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_r
     
     time_t t = time(NULL);
     struct tm* current_time = localtime(&t);
-    const size_t msg_size = 512;
-    const size_t arg_max_len = 256;
-    char msg[msg_size] = {0};
+    char msg[LOG_FILE_MSG_LEN] = {0};
     
-    sprintf(msg, "%d:%d:%d %d: %d", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, thread_id, client->sfd);
+    snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d %d: %d", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, thread_id, client->sfd);
     
     switch(req->cmd) {
         case APPEND:
-            strcat(msg, " APPEND ");
+            strncat(msg, " APPEND ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case CLOSE:
-            strcat(msg, " CLOSE ");
+            strncat(msg, " CLOSE ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case LOCK:
-            strcat(msg, " LOCK ");
+            strncat(msg, " LOCK ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case OPEN:
-            strcat(msg, " OPEN ");
+            strncat(msg, " OPEN ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case OPENC:
-            strcat(msg, " OPENC ");
+            strncat(msg, " OPENC ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case OPENCL:
-            strcat(msg, " OPENCL ");
+            strncat(msg, " OPENCL ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case OPENL:
-            strcat(msg, " OPENL ");
+            strncat(msg, " OPENL ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case QUIT:
-            strcat(msg, " QUIT");
+            strncat(msg, " QUIT", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case READ:
-            strcat(msg, " READ ");
+            strncat(msg, " READ ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case READN:
-            strcat(msg, " READN ");
+            strncat(msg, " READN ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case REMOVE:
-            strcat(msg, " REMOVE ");
+            strncat(msg, " REMOVE ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case UNLOCK:
-            strcat(msg, " UNLOCK ");
+            strncat(msg, " UNLOCK ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case WRITE:
-            strcat(msg, " WRITE ");
+            strncat(msg, " WRITE ", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         default:
             // Mai eseguito
@@ -878,7 +912,7 @@ static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_r
     }
     
     if(req->cmd != QUIT) {
-        strncat(msg, req->arg, arg_max_len);
+        strncat(msg, req->arg, LOG_FILE_MSG_LEN - strlen(msg) - 1);
     }
     
     switch(resp_code) {
@@ -887,31 +921,31 @@ static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_r
         case 221:
             // Success
             if(req->cmd == APPEND || req->cmd == READ || req->cmd == READN || req->cmd == REMOVE || req->cmd == WRITE) {
-                sprintf(msg + strlen(msg), " SUCCESS (%lu)\n", bytes);
+                snprintf(msg + strlen(msg), LOG_FILE_MSG_LEN - strlen(msg), " SUCCESS (%lu)\n", bytes);
             } else {
-                strcat(msg, " SUCCESS\n");
+                strncat(msg, " SUCCESS\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             }
             break;
         case 421:
-            strcat(msg, " FAILURE (service not available)\n");
+            strncat(msg, " FAILURE (service not available)\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case 501:
-            strcat(msg, " FAILURE (syntax error)\n");
+            strncat(msg, " FAILURE (syntax error)\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case 550:
-            strcat(msg, " FAILURE (file not found)\n");
+            strncat(msg, " FAILURE (file not found)\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case 552:
-            strcat(msg, " FAILURE (exceeded storage allocation)\n");
+            strncat(msg, " FAILURE (exceeded storage allocation)\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case 554:
-            strcat(msg, " FAILURE (no access)\n");
+            strncat(msg, " FAILURE (no access)\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case 555:
-            strcat(msg, " FAILURE (file already exists)\n");
+            strncat(msg, " FAILURE (file already exists)\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         case 556:
-            strcat(msg, " FAILURE (cannot perform the operation)\n");
+            strncat(msg, " FAILURE (cannot perform the operation)\n", LOG_FILE_MSG_LEN - strlen(msg) - 1);
             break;
         default:
             break;
@@ -961,8 +995,8 @@ static void* worker(void* arg) {
             // Scrive nel file di log e su stdout
             time_t t = time(NULL);
             struct tm* current_time = localtime(&t);
-            char msg[64] = {0};
-            sprintf(msg, "%d:%d:%d CONNECTION_CLOSED: %d (client not found)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, sfd);
+            char msg[LOG_FILE_MSG_LEN] = {0};
+            snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d (client not found)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, sfd);
             write(log_file, msg, strlen(msg));
             write(1, msg, strlen(msg));
             
@@ -1167,7 +1201,15 @@ static int capacityMiss(void** data, size_t* data_len) {
         return -1;
     }
     
-    char msg[512] = {0};
+    // Messaggio per il file di log
+    char msg[LOG_FILE_MSG_LEN] = {0};
+    time_t t = time(NULL);
+    struct tm* current_time = localtime(&t);
+    snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CAPACITY_MISS\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
+    // Scrive nel file di log e su stdout
+    write(log_file, msg, strlen(msg));
+    write(1, msg, strlen(msg));
+    
     long int wrote_bytes_tot = 0;
     long int wrote_bytes = 0;
     while(files_num > config_file.files_max_num || storage_size > config_file.storage_max_size) {
@@ -1186,7 +1228,7 @@ static int capacityMiss(void** data, size_t* data_len) {
         // Messaggio per il file di log
         time_t t = time(NULL);
         struct tm* current_time = localtime(&t);
-        snprintf(msg, 512, "%d:%d:%d CAPACITY_MISS: %s (%lu)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, file->pathname, file->size);
+        snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d REJECTED_FILE: %s (%lu)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, file->pathname, file->size);
         // Scrive nel file di log e su stdout
         write(log_file, msg, strlen(msg));
         write(1, msg, strlen(msg));
@@ -1656,8 +1698,6 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
     resp->data_len = 0;
     resp->data = NULL;
     
-    int locked = 0;
-    
     FSP_FILE file;
     
     pthread_mutex_lock(&files_mutex);
@@ -1666,25 +1706,38 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
     // Se il file esiste ma deve essere rimosso, allora non esegue il comando
     if(file != NULL && file->remove) file = NULL;
     if(file != NULL) {
+        // Apre il file se necessario
+        if(!fsp_files_list_contains(client->openedFiles, req->arg)) {
+            // File non ancora aperto dal client
+            // Aggiunge un nuovo collegamento al file
+            file->links++;
+            // Aggiunge il file nella lista dei file aperti dal client
+            fsp_files_list_add(&(client->openedFiles), file);
+        }
+        
         if(file->locked < 0) {
             // Nessuno detiene la lock sul file
-            if(!fsp_files_list_contains(client->openedFiles, req->arg)) {
-                // File non ancora aperto dal client
-                // Aggiunge un nuovo collegamento al file
-                file->links++;
-                // Setta la lock al file
-                file->locked = client->sfd;
-                // Aggiunge il file nella lista dei file aperti dal client
-                fsp_files_list_add(&(client->openedFiles), file);
+            // Setta la lock al file
+            file->locked = client->sfd;
+        } else if(file->locked == client->sfd) {
+            // Il client detiene già la lock sul file
+        } else {
+            // Attende di ottenere la lock su una variabile di condizione
+            while(file->locked >= 0 && !file->remove) {
+                pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
+            }
+            if(file->remove) {
+                file->links--;
+                fsp_files_list_remove(&(client->openedFiles), req->arg);
+                // Rimuove il file se links == 0
+                if(file->links == 0) {
+                    fsp_files_hash_table_delete(files, req->arg);
+                    fsp_file_free(file);
+                }
+                file = NULL;
             } else {
-                // File già aperto dal client
-                // Setta la lock al file
                 file->locked = client->sfd;
             }
-        } else if(file->locked == client->sfd) {
-            // Il file è già aperto dal client e il client detiene già la lock sul file
-        } else {
-            locked = 1;
         }
     }
     pthread_mutex_unlock(&files_mutex);
@@ -1693,13 +1746,6 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
         // File non trovato
         resp->code = 550;
         strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
-        resp->description[descr_max_len-1] = '\0';
-        return 0;
-    }
-    if(locked) {
-        // Un altro client ha settato la lock sul file
-        resp->code = 554;
-        strncpy(resp->description, "Requested action not taken. No access.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }

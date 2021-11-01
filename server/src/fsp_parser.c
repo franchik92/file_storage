@@ -183,7 +183,7 @@ long int fsp_parser_makeRequest(void** buf, size_t* size, enum fsp_command cmd, 
     
     // data_len
     char data_len_str[12];
-    sprintf(data_len_str, "%ld", data_len);
+    snprintf(data_len_str, 12, "%ld", data_len);
     
     // Determina le lunghezze delle singole stringhe
     size_t cmd_len, arg_len, data_len_str_len, tot_len;
@@ -330,11 +330,11 @@ long int fsp_parser_makeResponse(void** buf, size_t* size, int code, const char*
     
     // code
     char code_str[12];
-    sprintf(code_str, "%d", code);
+    snprintf(code_str, 12, "%d", code);
     
     // data_len
     char data_len_str[12];
-    sprintf(data_len_str, "%ld", data_len);
+    snprintf(data_len_str, 12, "%ld", data_len);
     
     // Determina le lunghezze delle singole stringhe
     size_t code_len, descr_len, data_len_str_len, tot_len;
@@ -479,7 +479,7 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
     
     // data_size
     char data_size_str[12];
-    sprintf(data_size_str, "%ld", data_size);
+    snprintf(data_size_str, 12, "%ld", data_size);
     
     long int pathname_len, data_size_str_len, tot_len;
     pathname_len = strlen(pathname);

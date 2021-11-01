@@ -458,6 +458,29 @@ static int write_opt(char* arg, char* dirname, const struct timespec time, int p
         return 0;
     }
     
+    // Determina il path assoluto della directory dirname
+    char _dirname[FSP_CLIENT_FILE_MAX_LEN];
+    if(dirname != NULL) {
+        if(realpath(dirname, _dirname) == NULL) {
+            if(errno == ENOENT) {
+                // Directory non trovata
+                fprintf(stderr, "Errore richiesta -w: directory %s non trovata.\n", dirname);
+            } else if(errno == ENOTDIR) {
+                // Path non valido
+                fprintf(stderr, "Errore richiesta -w: il path %s non è valido.\n", dirname);
+            } else {
+                // Impossibile determinare il path assoluto della directory
+                fprintf(stderr, "Errore richiesta -w: impossibile determinare il path assoluto della directory %s.\n", dirname);
+            }
+            
+            // Stampa l'esito sullo standard output
+            if(p) {
+                printf("Errore: scrittura sul server dei file contenuti nella cartella %s non eseguita (directory %s non trovata).\n", dir_arg, dirname);
+            }
+            return 0;
+        }
+    }
+    
     char current_dir[FSP_CLIENT_FILE_MAX_LEN];
     if(getcwd(current_dir, FSP_CLIENT_FILE_MAX_LEN) == NULL) {
         fprintf(stderr, "Errore richiesta -w: è stato impossibile determinare la working directory corrente.\n");
@@ -476,7 +499,7 @@ static int write_opt(char* arg, char* dirname, const struct timespec time, int p
         return 0;
     }
     
-    if((retVal = write_opt_rec(&n, dirname, time, p, opened_files)) != 0) return retVal;
+    if((retVal = write_opt_rec(&n, dirname != NULL ? _dirname : dirname, time, p, opened_files)) != 0) return retVal;
     
     if(chdir(current_dir) != 0) {
         // Errore: impossibile tornare alla working directory precedente
@@ -763,8 +786,7 @@ static int Write_opt(char* arg, char* dirname, const struct timespec time, int p
             // Stampa l'esito sullo standard output
             if(p) printf("Errore: scrittura del file %s sul server non eseguita (file inesistente).\n", file);
             
-            if((file = strtok(NULL, ",")) != NULL) continue;
-            return 0;
+            continue;
         }
         
         // Controlla se il file è già stato aperto
@@ -778,8 +800,7 @@ static int Write_opt(char* arg, char* dirname, const struct timespec time, int p
         } else if(open_file(filename, O_CREATE | O_LOCK, dirname, 1) != 0) {
             // Apre il file
             if(p) printf("Errore: scrittura del file %s sul server non eseguita (apertura con flags O_CREATE | O_LOCK non riuscita).\n", filename);
-            if((file = strtok(NULL, ",")) != NULL) continue;
-            return 0;
+            continue;
         }
         // Aggiunge il file nella tabella hash se necessario
         if(opened_file == NULL && fsp_opened_files_hash_table_insert(opened_files, filename, append ? O_DEFAULT : O_CREATE | O_LOCK) != 0) {
@@ -969,8 +990,7 @@ static int read_opt(char* arg, char* dirname, const struct timespec time, int p,
             // Apre il file
             if(open_file(file, O_DEFAULT, NULL, 1) != 0) {
                 if(p) printf("Errore: lettura del file %s dal server non eseguita (apertura del file non riuscita).\n", file);
-                if((file = strtok(NULL, ",")) != NULL) continue;
-                return 0;
+                continue;
             }
             // Aggiunge il file nella tabella hash
             if(fsp_opened_files_hash_table_insert(files, file, O_DEFAULT) != 0) {
@@ -1191,16 +1211,14 @@ static int lock_opt(char* arg, const struct timespec time, int p, OpenedFiles* f
             // Apre il file
             if(open_file(file, O_LOCK, NULL, 1) != 0) {
                 if(p) printf("Errore: non è stato possibile settare il flag O_LOCK al file %s durante la sua apertura.\n", file);
-                if((file = strtok(NULL, ",")) != NULL) continue;
-                return 0;
+                continue;
             }
             // Aggiunge il file nella tabella hash
             if(fsp_opened_files_hash_table_insert(files, file, O_LOCK) != 0) {
                 close_file(file);
                 return -1;
             }
-            if((file = strtok(NULL, ",")) != NULL) continue;
-            return 0;
+            continue;
         }
         
         // Setta la lock
@@ -1348,8 +1366,7 @@ static int cancel_opt(char* arg, const struct timespec time, int p, OpenedFiles*
             // Apre il file
             if(open_file(file, O_LOCK, NULL, 1) != 0) {
                 if(p) printf("Errore: non è stato possibile rimuovere dal server il file %s (apertura con flag O_LOCK non riuscita).\n", file);
-                if((file = strtok(NULL, ",")) != NULL) continue;
-                return 0;
+                continue;
             }
             // Aggiunge il file nella tabella hash
             if(fsp_opened_files_hash_table_insert(files, file, O_LOCK) != 0) {
@@ -1458,10 +1475,6 @@ static int open_file(const char* pathname, int flags, const char* dirname, int p
             case ENOMEM:
                 // Se non c'è sufficiente memoria sul server per eseguire l'operazione
                 if(p) fprintf(stderr, "Errore openFile: memoria sul server insufficiente per creare il file %s.\n", pathname);
-                break;
-            case EPERM:
-                // Se l'operazione non è consentita
-                if(p) fprintf(stderr, "Errore openFile: operazione non consentita sul file %s.\n", pathname);
                 break;
             case EEXIST:
                 // Se viene passato il flag O_CREATE ed il file pathname esiste già memorizzato nel server

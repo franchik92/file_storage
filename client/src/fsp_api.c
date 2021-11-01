@@ -200,6 +200,7 @@ int openFile(const char* pathname, int flags, const char* dirname) {
     
     struct fsp_response resp;
     if(receiveFspResp(&resp) != 0) {
+        if(errno == EPERM) errno = EBADMSG;
         return -1;
     }
     if(resp.code != 200) {
@@ -291,7 +292,7 @@ int readNFiles(int N, const char* dirname) {
     
     // N_str
     char N_str[12];
-    sprintf(N_str, "%d", N);
+    snprintf(N_str, 12, "%d", N);
     
     if(sendFspReq(READN, N_str, 0, NULL) != 0) {
         return -1;
