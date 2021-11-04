@@ -249,7 +249,7 @@ int main(int argc, char* argv[]) {
                 if(p) {
                     printf("-w %s", req->arg);
                     if(req->dirname != NULL) printf(" -D %s", req->dirname);
-                    if(time != 0) printf(" -t %lu", time);
+                    printf(" -t %lu", time);
                     printf("\n");
                 }
                 switch (retVal = write_opt(req->arg, req->dirname, abstime, p, opened_files)) {
@@ -271,7 +271,7 @@ int main(int argc, char* argv[]) {
                 if(p) {
                     printf("-W %s", req->arg);
                     if(req->dirname != NULL) printf(" -D %s", req->dirname);
-                    if(time != 0) printf(" -t %lu", time);
+                    printf(" -t %lu", time);
                     printf("\n");
                 }
                 switch (retVal = Write_opt(req->arg, req->dirname, abstime, p, opened_files)) {
@@ -289,7 +289,7 @@ int main(int argc, char* argv[]) {
                 if(p) {
                     printf("-r %s", req->arg);
                     if(req->dirname != NULL) printf(" -d %s", req->dirname);
-                    if(time != 0) printf(" -t %lu", time);
+                    printf(" -t %lu", time);
                     printf("\n");
                 }
                 switch (retVal = read_opt(req->arg, req->dirname, abstime, p, opened_files)) {
@@ -308,28 +308,34 @@ int main(int argc, char* argv[]) {
                     printf("-R");
                     if(req->arg != NULL) printf(" %s", req->arg);
                     if(req->dirname != NULL) printf(" -d %s", req->dirname);
-                    if(time != 0) printf(" -t %lu", time);
+                    printf(" -t %lu", time);
                     printf("\n");
                 }
                 Read_opt(req->arg, req->dirname, abstime, p);
                 break;
             case 'l':
-                if(p) printf("-l %s", req->arg);
-                if(time != 0) printf(" -t %lu", time);
-                printf("\n");
+                if(p) {
+                    printf("-l %s", req->arg);
+                    printf(" -t %lu", time);
+                    printf("\n");
+                }
                 retVal = lock_opt(req->arg, abstime, p, opened_files);
                 if(retVal != 0) fprintf(stderr, "Errore richiesta -l: impossibile aggiornare la tabella hash.\n");
                 break;
             case 'u':
-                if(p) printf("-u %s", req->arg);
-                if(time != 0) printf(" -t %lu", time);
-                printf("\n");
+                if(p) {
+                    printf("-u %s", req->arg);
+                    printf(" -t %lu", time);
+                    printf("\n");
+                }
                 unlock_opt(req->arg, abstime, p);
                 break;
             case 'c':
-                if(p) printf("-c %s", req->arg);
-                if(time != 0) printf(" -t %lu", time);
-                printf("\n");
+                if(p) {
+                    printf("-c %s", req->arg);
+                    printf(" -t %lu", time);
+                    printf("\n");
+                }
                 retVal = cancel_opt(req->arg, abstime, p, opened_files);
                 if(retVal != 0) fprintf(stderr, "Errore richiesta -c: impossibile aggiornare la tabella hash.\n");
                 break;

@@ -101,7 +101,7 @@ static volatile sig_atomic_t quit = 0;
 static volatile sig_atomic_t accept_connections = 1;
 
 // Quando i thread worker sono in esecuzione, viene usato files_mutex per l'accesso alle variabili
-// files_num, storage_size, files_max_reached_num, storage_max_reached_size e capacity_misses
+// files_num, storage_size, files_max_reached_num, storage_max_reached_size, e capacity_misses
 
 // Numero dei file presenti
 static unsigned int files_num = 0;
@@ -117,6 +117,11 @@ static unsigned int capacity_misses = 0;
 
 // Numero dei thread worker attivi (usata con clients_mutex quando i worker thread sono in esecuzione)
 static unsigned int active_workers = 0;
+// Numero di thread in attesa della lock
+// Variabile necessaria per evitare l'evento in cui tutti i thread siano in attesa della lock sulla variabile di condizione
+// lock_cmd_isNotLocked (usata con clients_mutex)
+// Deve sempre valere active_workers > 1 => 0 <= locked_threads < active_workers
+static unsigned int locked_threads = 0;
 
 /**
  * \brief Libera dalla memoria ogni struttura dati condivisa (files, files_queue, clients, sfd_queue)
@@ -275,7 +280,8 @@ int main(int argc, const char* argv[]) {
     // Path del file di configurazione
     char config_file_path[UNIX_PATH_MAX];
     strncpy(config_file_path, home_dir, UNIX_PATH_MAX);
-    if(UNIX_PATH_MAX-strlen(config_file_path) > 0) {
+    config_file_path[UNIX_PATH_MAX-1] = '\0';
+    if(UNIX_PATH_MAX-1-strlen(config_file_path) >= strlen("/.file_storage/config.txt")) {
         strcat(config_file_path, "/.file_storage/config.txt");
     } else {
         // Il path del file di configurazione è troppo lungo
@@ -285,7 +291,8 @@ int main(int argc, const char* argv[]) {
     
     // Path di default del file di log
     strncpy(config_file.log_file_name, home_dir, UNIX_PATH_MAX);
-    if(UNIX_PATH_MAX-strlen(config_file.log_file_name) > 0) {
+    config_file.log_file_name[UNIX_PATH_MAX-1] = '\0';
+    if(UNIX_PATH_MAX-1-strlen(config_file.log_file_name) >= strlen("/.file_storage/file_storage.log")) {
         strcat(config_file.log_file_name, "/.file_storage/file_storage.log");
     } else {
         // Il path del file di log è troppo lungo
@@ -421,6 +428,7 @@ int main(int argc, const char* argv[]) {
     struct sockaddr_un sockaddr;
     sockaddr.sun_family = AF_UNIX;
     strncpy(sockaddr.sun_path, config_file.socket_file_name, UNIX_PATH_MAX);
+    sockaddr.sun_path[UNIX_PATH_MAX-1] = '\0';
     if(bind(sfd, (struct sockaddr*) &sockaddr, sizeof(sockaddr)) == -1) {
         perror(NULL);
         destroyAll();
@@ -814,8 +822,10 @@ static int parseConfigFile(char* path) {
         
         if(strcmp("SOCKET_FILE_NAME", param_start) == 0) {
             strncpy(config_file.socket_file_name, val_start, UNIX_PATH_MAX);
+            config_file.socket_file_name[UNIX_PATH_MAX-1] = '\0';
         } else if(strcmp("LOG_FILE_NAME", param_start) == 0) {
             strncpy(config_file.log_file_name, val_start, UNIX_PATH_MAX);
+            config_file.log_file_name[UNIX_PATH_MAX-1] = '\0';
         } else if(strcmp("FILES_MAX_NUM", param_start) == 0) {
             if(!isNumber(val_start, &val) || val < 0) {
                 // Errore di sintassi
@@ -1451,6 +1461,7 @@ static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_res
     
     FSP_FILE file;
     int notOpened = 0;
+    int cannotLock = 0;
     
     pthread_mutex_lock(&files_mutex);
     // Cerca il file
@@ -1466,14 +1477,31 @@ static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_res
             // Setta la lock
             file->locked = client->sfd;
         } else {
-            // Attende di ottenere la lock su una variabile di condizione
-            while(file->locked >= 0 && !file->remove) {
-                pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
+            
+            pthread_mutex_lock(&clients_mutex);
+            locked_threads++;
+            if(active_workers > 1 && locked_threads == active_workers) {
+                cannotLock = 1;
+                locked_threads--;
             }
-            if(file->remove) {
-                file = NULL;
-            } else {
-                file->locked = client->sfd;
+            pthread_mutex_unlock(&clients_mutex);
+            
+            if(!cannotLock) {
+                // Attende di ottenere la lock su una variabile di condizione
+                while(file->locked >= 0 && !file->remove) {
+                    pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
+                }
+                
+                pthread_mutex_lock(&clients_mutex);
+                locked_threads--;
+                pthread_mutex_unlock(&clients_mutex);
+                
+                if(file->remove) {
+                    file = NULL;
+                    pthread_cond_broadcast(&lock_cmd_isNotLocked);
+                } else {
+                    file->locked = client->sfd;
+                }
             }
         }
     }
@@ -1486,8 +1514,8 @@ static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_res
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(notOpened) {
-        // File non aperto dal client
+    if(notOpened || cannotLock) {
+        // File non aperto dal client o impossibile ottenere la lock
         resp->code = 556;
         strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
@@ -1698,6 +1726,8 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
     resp->data_len = 0;
     resp->data = NULL;
     
+    int cannotLock = 0;
+    
     FSP_FILE file;
     
     pthread_mutex_lock(&files_mutex);
@@ -1722,21 +1752,38 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
         } else if(file->locked == client->sfd) {
             // Il client detiene già la lock sul file
         } else {
-            // Attende di ottenere la lock su una variabile di condizione
-            while(file->locked >= 0 && !file->remove) {
-                pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
+            
+            pthread_mutex_lock(&clients_mutex);
+            locked_threads++;
+            if(active_workers > 1 && locked_threads == active_workers) {
+                cannotLock = 1;
+                locked_threads--;
             }
-            if(file->remove) {
-                file->links--;
-                fsp_files_list_remove(&(client->openedFiles), req->arg);
-                // Rimuove il file se links == 0
-                if(file->links == 0) {
-                    fsp_files_hash_table_delete(files, req->arg);
-                    fsp_file_free(file);
+            pthread_mutex_unlock(&clients_mutex);
+            
+            if(!cannotLock) {
+                // Attende di ottenere la lock su una variabile di condizione
+                while(file->locked >= 0 && !file->remove) {
+                    pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
                 }
-                file = NULL;
-            } else {
-                file->locked = client->sfd;
+                
+                pthread_mutex_lock(&clients_mutex);
+                locked_threads--;
+                pthread_mutex_unlock(&clients_mutex);
+                
+                if(file->remove) {
+                    file->links--;
+                    fsp_files_list_remove(&(client->openedFiles), req->arg);
+                    // Rimuove il file se links == 0
+                    if(file->links == 0) {
+                        fsp_files_hash_table_delete(files, req->arg);
+                        fsp_file_free(file);
+                    }
+                    file = NULL;
+                    pthread_cond_broadcast(&lock_cmd_isNotLocked);
+                } else {
+                    file->locked = client->sfd;
+                }
             }
         }
     }
@@ -1746,6 +1793,13 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
         // File non trovato
         resp->code = 550;
         strncpy(resp->description, "Requested action not taken. File not found.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        return 0;
+    }
+    if(cannotLock) {
+        // Impossibile ottenere la lock
+        resp->code = 556;
+        strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
@@ -1844,10 +1898,18 @@ static unsigned long int readn_cmd(CLIENT client, const struct fsp_request* req,
     }
     
     pthread_mutex_lock(&files_mutex);
-    if(n <= 0) n = files->files_num;
+    if(files_num == 0) {
+        resp->code = 200;
+        strncpy(resp->description, "The requested action has been successfully completed.", descr_max_len);
+        resp->description[descr_max_len-1] = '\0';
+        pthread_mutex_unlock(&files_mutex);
+        return bytes;
+    }
+    
+    if(n <= 0) n = files_num;
     
     // Stima la dimensione del buffer
-    size_t buf_size = (storage_size*n)/(files->files_num) + n*256;
+    size_t buf_size = (storage_size*n)/(files_num) + n*256;
     
     // Alloca la memoria
     if((resp->data = malloc(buf_size)) == NULL) {

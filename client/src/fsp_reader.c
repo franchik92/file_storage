@@ -62,8 +62,9 @@ int fsp_reader_readRequest(int sfd, void** buf, size_t* size, struct fsp_request
                 return -5;
             } else {
                 _buf = buf_tmp;
+                *buf = buf_tmp;
             }
-            len = (*size);
+            len = _size != FSP_READER_BUF_MAX_SIZE ? (*size) : FSP_READER_BUF_MAX_SIZE - (*size);
             (*size) = _size;
         }
     }
@@ -125,8 +126,9 @@ int fsp_reader_readResponse(int sfd, void** buf, size_t* size, struct fsp_respon
                 return -5;
             } else {
                 _buf = buf_tmp;
+                *buf = buf_tmp;
             }
-            len = (*size);
+            len = _size != FSP_READER_BUF_MAX_SIZE ? (*size) : FSP_READER_BUF_MAX_SIZE - (*size);
             (*size) = _size;
         }
     }

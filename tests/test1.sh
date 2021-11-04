@@ -59,7 +59,7 @@ ${client_dir}/fsp $f_opt -p \
     -u ${PWD}/${files_dir_01}/ec.png,${PWD}/${files_dir_02}/purrs.jpg,${PWD}/${files_dir_03}/file_01.txt,${PWD}/${files_dir_03}/file_02.txt -t 200 \
     -c ${PWD}/${files_dir_01}/yt.png -t 200 \
     -c ${PWD}/${files_dir_01}/yt.png,${PWD}/${files_dir_01}/mp.png,${PWD}/${files_dir_02}/Ivory.jpg,${PWD}/${files_dir_03}/file_03.txt -t 200 \
-    1> clients_out/c1_${index}.txt 2> clients_err_out/c1_${index}.txt &
+    1> clients_out/c.txt 2> clients_err_out/c.txt &
 
 # Attende cinque secondi
 echo "Attendere cinque secondi..."
