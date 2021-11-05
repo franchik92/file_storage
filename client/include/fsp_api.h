@@ -81,7 +81,7 @@ int closeConnection(const char* sockname);
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *
  *         EINVAL: se pathname == NULL || (flags != O_DEFAULT && flags != O_CREATE && flags != O_LOCK && flags != O_CREATE | O_LOCK) ||
- *                 dirname non è una directory (se dirname != NULL).
+ *                 (dirname != NULL && dirname non è una directory).
  *         ENOTCONN: se non è stata aperta la connessione con openConnection().
  *         ENOBUFS: se la memoria per il buffer non è sufficiente.
  *         EIO: se ci sono stati errori di lettura e scrittura su socket o
@@ -129,7 +129,7 @@ int readFile(const char* pathname, void** buf, size_t* size);
  *         effettivamente letti),
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *
- *         EINVAL: se dirname == NULL || dirname non è una directory.
+ *         EINVAL: se dirname != NULL && dirname non è una directory.
  *         ENOTCONN: se non è stata aperta la connessione con openConnection().
  *         ENOBUFS: se la memoria per il buffer non è sufficiente o
  *                  non è stato possibile allocare memoria.
@@ -151,7 +151,7 @@ int readNFiles(int N, const char* dirname);
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *
- *         EINVAL: se pathname == NULL || pathname non è un file regolare || dirname non è una directory (se dirname != NULL).
+ *         EINVAL: se pathname == NULL || pathname non è un file regolare || (dirname != NULL && dirname non è una directory).
  *         ENOTCONN: se non è stata aperta la connessione con openConnection().
  *         ENOBUFS: se la memoria per il buffer non è sufficiente o
  *                  non è stato possibile allocare memoria.
@@ -176,7 +176,7 @@ int writeFile(const char* pathname, const char* dirname);
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *
- *         EINVAL: se pathname == NULL || buf == NULL || size < 0 || dirname non è una directory (se dirname != NULL).
+ *         EINVAL: se pathname == NULL || buf == NULL || size < 0 || (dirname != NULL && dirname non è una directory).
  *         ENOTCONN: se non è stata aperta la connessione con openConnection().
  *         ENOBUFS: se la memoria per il buffer non è sufficiente o
  *                  non è stato possibile allocare memoria.

@@ -28,7 +28,7 @@ echo "WORKER_THREADS_NUM=1" >> $config_file
 # Avvia in background il processo server
 if command -v valgrind &> /dev/null
 then
-    valgrind -leak-check=full ${server_dir}/fsp_server 1> server_out/s.txt 2> server_err_out/s.txt &
+    valgrind --leak-check=full ${server_dir}/fsp_server 1> server_out/s.txt 2> server_err_out/s.txt &
 else
     echo "Valgrind non disponibile: il processo server verrà eseguito senza valgrind"
     ${server_dir}/fsp_server 1> server_out/s.txt 2> server_err_out/s.txt &
@@ -54,9 +54,9 @@ ${client_dir}/fsp $f_opt -p \
     -R -d downloaded_files -t 200 \
     -R 0 -d downloaded_files -t 200 \
     -l ${PWD}/${files_dir_02}/play.jpg -t 200 \
-    -l ${PWD}/${files_dir_01}/ec.png,${PWD}/${files_dir_02}/purrs.jpg,${PWD}/${files_dir_03}/file_01.txt -t 200 \
+    -l ${PWD}/${files_dir_01}/us.png,${PWD}/${files_dir_02}/purrs.jpg,${PWD}/${files_dir_03}/file_01.txt -t 200 \
     -u ${PWD}/${files_dir_02}/play.jpg -t 200 \
-    -u ${PWD}/${files_dir_01}/ec.png,${PWD}/${files_dir_02}/purrs.jpg,${PWD}/${files_dir_03}/file_01.txt,${PWD}/${files_dir_03}/file_02.txt -t 200 \
+    -u ${PWD}/${files_dir_01}/us.png,${PWD}/${files_dir_02}/purrs.jpg,${PWD}/${files_dir_03}/file_01.txt,${PWD}/${files_dir_03}/file_02.txt -t 200 \
     -c ${PWD}/${files_dir_01}/yt.png -t 200 \
     -c ${PWD}/${files_dir_01}/yt.png,${PWD}/${files_dir_01}/mp.png,${PWD}/${files_dir_02}/Ivory.jpg,${PWD}/${files_dir_03}/file_03.txt -t 200 \
     1> clients_out/c.txt 2> clients_err_out/c.txt &

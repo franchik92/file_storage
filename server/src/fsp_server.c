@@ -3,6 +3,8 @@
  * Matricola: 579131
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -580,7 +582,7 @@ int main(int argc, const char* argv[]) {
                         
                         int serviceNotAvailable = 0;
                         pthread_mutex_lock(&clients_mutex);
-                        if(clients->clients_num == config_file.max_conn) {
+                        if(clients->clients_num > config_file.max_conn) {
                             serviceNotAvailable = 1;
                         } else {
                             // Aggiunge il client alla tabella hash

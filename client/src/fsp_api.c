@@ -3,6 +3,8 @@
  * Matricola: 579131
  */
 
+#define _POSIX_C_SOURCE 199309L
+
 #include <fsp_api.h>
 #include <fsp_parser.h>
 #include <fsp_reader.h>
@@ -209,6 +211,7 @@ int openFile(const char* pathname, int flags, const char* dirname) {
     }
     
     if(resp.data_len > 0 && dirname != NULL) {
+        // Salva i dati espulsi dal server nella cartella dirname
         return saveData(dirname, resp.data_len, resp.data) >= 0 ? 0 : -1;
     }
     
@@ -273,21 +276,19 @@ int readFile(const char* pathname, void** buf, size_t* size) {
 }
 
 int readNFiles(int N, const char* dirname) {
-    if(dirname == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
+    if(dirname != NULL) {
     // Controlla se dirname è una directory
-    struct stat info;
-    if(stat(dirname, &info) == 0) {
-        if(!S_ISDIR(info.st_mode)) {
+        struct stat info;
+        if(stat(dirname, &info) == 0) {
+            if(!S_ISDIR(info.st_mode)) {
+                errno = EINVAL;
+                return -1;
+            }
+        } else {
+            // Errore stat
             errno = EINVAL;
             return -1;
         }
-    } else {
-        // Errore stat
-        errno = EINVAL;
-        return -1;
     }
     
     // N_str
@@ -308,8 +309,8 @@ int readNFiles(int N, const char* dirname) {
         return -1;
     }
     
-    // Salva i dati ricevuti
-    if(resp.data_len > 0) {
+    if(resp.data_len > 0 && dirname != NULL) {
+        // Salva i dati ricevuti nella cartella dirname
         return saveData(dirname, resp.data_len, resp.data);
     }
     
@@ -416,6 +417,7 @@ int writeFile(const char* pathname, const char* dirname) {
     }
     
     if(resp.data_len > 0 && dirname != NULL) {
+        // Salva i dati espulsi dal server nella cartella dirname
         return saveData(dirname, resp.data_len, resp.data) >= 0 ? 0 : -1;
     }
     
@@ -478,8 +480,8 @@ int appendToFile(const char* pathname, void* buf, size_t size, const char* dirna
         return -1;
     }
     
-    // Controlla se ci sono dati espulsi dal server
     if(resp.data_len > 0 && dirname != NULL) {
+        // Salva i dati espulsi dal server nella cartella dirname
         return saveData(dirname, resp.data_len, resp.data) >= 0 ? 0 : -1;
     }
     

@@ -72,6 +72,14 @@ while [ $SECONDS -lt $end ]; do
         -r ${PWD}/${files_dir_01}/pm.png,${PWD}/${files_dir_02}/Ivory.jpg,${PWD}/${files_dir_03}/file_03.txt -d downloaded_files -t 0 \
         -w ${files_dir_03} -D rejected_files \
         &> /dev/null &
+    ${client_dir}/fsp $f_opt \
+        -W ${files_dir_01}/pm.png,${files_dir_01}/vi.png -D rejected_files -t 0 \
+        -r ${PWD}/${files_dir_01}/pm.png,${PWD}/${files_dir_01}/vi.png -d downloaded_files -t 0 \
+        -l ${PWD}/${files_dir_01}/pm.png,${PWD}/${files_dir_01}/vi.png -t 0 \
+        -c ${PWD}/${files_dir_01}/pm.png -t 0 \
+        -u ${PWD}/${files_dir_01}/vi.png \
+        &> /dev/null &
+    sleep 0.1
 done
 
 # Invia il segnale SIGINT al server

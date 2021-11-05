@@ -3,6 +3,9 @@
  * Matricola: 579131
  */
 
+#define _POSIX_C_SOURCE 199309L
+#define _BSD_SOURCE
+
 #include <fsp_api.h>
 #include <fsp_client_request_queue.h>
 #include <fsp_opened_files_hash_table.h>
@@ -111,13 +114,13 @@ int main(int argc, char* argv[]) {
             case 'l':
             case 'u':
             case 'c':
-                if(optopt == 'R' && optarg[0] == '-') {
+                if(c == 'R' && optarg[0] == '-') {
                     optind--;
                     arg = NULL;
                 } else {
                     arg = optarg;
                 }
-                if((req = fsp_client_request_queue_newRequest(optopt, arg)) == NULL) {
+                if((req = fsp_client_request_queue_newRequest(c, arg)) == NULL) {
                     // Errore: memoria insufficiente
                     fprintf(stderr, "Errore: memoria insufficiente.\n");
                     fsp_client_request_queue_freeAllRequests(&queue);
@@ -633,7 +636,7 @@ static int write_opt_rec(long int* n, char* dirname, const struct timespec time,
                     if((retVal = appendToFile(filename, buf, buf_size, dirname)) != 0) {
                         switch(errno) {
                             case EINVAL:
-                                // Se pathname == NULL || buf == NULL || size < 0 || dirname non è una directory (se dirname != NULL)
+                                // Se pathname == NULL || buf == NULL || size < 0 || (dirname != NULL && dirname non è una directory)
                                 fprintf(stderr, "Errore appendToFile: uno o più argomenti passati alla funzione non sono validi.\n");
                                 break;
                             case ENOTCONN:
@@ -682,7 +685,7 @@ static int write_opt_rec(long int* n, char* dirname, const struct timespec time,
                     if((retVal = writeFile(filename, dirname)) != 0) {
                         switch(errno) {
                             case EINVAL:
-                                // Se pathname == NULL || pathname non è un file regolare || dirname non è una directory
+                                // Se pathname == NULL || pathname non è un file regolare || (dirname != NULL && dirname non è una directory)
                                 fprintf(stderr, "Errore writeFile: uno o più argomenti passati alla funzione non sono validi.\n");
                                 break;
                             case ENOTCONN:
@@ -858,7 +861,7 @@ static int Write_opt(char* arg, char* dirname, const struct timespec time, int p
             if((retVal = appendToFile(filename, buf, buf_size, dirname)) != 0) {
                 switch(errno) {
                     case EINVAL:
-                        // Se pathname == NULL || buf == NULL || size < 0 || dirname non è una directory (se dirname != NULL)
+                        // Se pathname == NULL || buf == NULL || size < 0 || (dirname != NULL && dirname non è una directory)
                         fprintf(stderr, "Errore appendToFile: uno o più argomenti passati alla funzione non sono validi.\n");
                         break;
                     case ENOTCONN:
@@ -907,7 +910,7 @@ static int Write_opt(char* arg, char* dirname, const struct timespec time, int p
             if((retVal = writeFile(filename, dirname)) != 0) {
                 switch(errno) {
                     case EINVAL:
-                        // Se pathname == NULL || pathname non è un file regolare || dirname non è una directory
+                        // Se pathname == NULL || pathname non è un file regolare || (dirname != NULL && dirname non è una directory)
                         fprintf(stderr, "Errore writeFile: uno o più argomenti passati alla funzione non sono validi.\n");
                         break;
                     case ENOTCONN:
@@ -1151,17 +1154,17 @@ static void Read_opt(char* arg, char* dirname, const struct timespec time, int p
             fprintf(stderr, "Errore richiesta -R: il valore n specificato non è valido.\n");
             // Stampa l'esito sullo standard output
             if(p) {
-                printf("Errore: impossibile scrivere i file nella cartella %s (valore n non valido).\n", dirname);
+                printf("Errore: impossibile leggere i file dal server (valore n non valido).\n");
             }
             return;
         }
     }
     
-    if((retVal = readNFiles((int) n, dirname)) != 0) {
+    if((retVal = readNFiles((int) n, dirname)) == -1) {
         switch(errno) {
             case EINVAL:
-                // Se dirname == NULL || dirname non è una directory
-                fprintf(stderr, "Errore readNFiles: uno o più argomenti passati alla funzione non sono validi.\n");
+                // Se dirname != NULL && dirname non è una directory
+                fprintf(stderr, "Errore readNFiles: l'argomento dirname non è valido.\n");
                 break;
             case ENOTCONN:
                 // Se non è stata aperta la connessione con openConnection()
@@ -1187,15 +1190,18 @@ static void Read_opt(char* arg, char* dirname, const struct timespec time, int p
                 break;
         }
     }
-    
+
     // Stampa l'esito sullo standard output
     if(p) {
         if(retVal >= 0) {
             // Operazione terminata con successo
-            printf("Sono stati scritti con successo %d file nella cartella %s.\n", retVal, dirname);
+            printf("Sono stati letti %d file dal server con successo.\n", retVal);
+            if(dirname != NULL) {
+                printf("I file sono stati scritti nella cartella %s con successo.\n", dirname);
+            }
         } else {
             // Operazione non terminata con successo
-            printf("Errore: non è stato possibile scrivere nessun file nella cartella %s.\n", dirname);
+            printf("Errore: lettura dei file dal server non eseguita (operazione non riuscita).\n");
         }
     }
     

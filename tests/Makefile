@@ -1,9 +1,9 @@
 .PHONY: all clean
 
 all:
-	-mkdir ~/.file_storage clients_out clients_err_out server_out server_err_out downloaded_files rejected_files
+	-mkdir clients_out clients_err_out server_out server_err_out downloaded_files rejected_files
 clean:
-	-rm -fR ~/.file_storage clients_out clients_err_out server_out server_err_out downloaded_files rejected_files
+	-rm -fR clients_out clients_err_out server_out server_err_out downloaded_files rejected_files
 test1:
 	./test1.sh
 test2:
