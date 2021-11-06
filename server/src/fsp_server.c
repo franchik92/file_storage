@@ -119,11 +119,6 @@ static unsigned int capacity_misses = 0;
 
 // Numero dei thread worker attivi (usata con clients_mutex quando i worker thread sono in esecuzione)
 static unsigned int active_workers = 0;
-// Numero di thread in attesa della lock
-// Variabile necessaria per evitare l'evento in cui tutti i thread siano in attesa della lock sulla variabile di condizione
-// lock_cmd_isNotLocked (usata con clients_mutex)
-// Deve sempre valere active_workers > 1 => 0 <= locked_threads < active_workers
-static unsigned int locked_threads = 0;
 
 /**
  * \brief Libera dalla memoria ogni struttura dati condivisa (files, files_queue, clients, sfd_queue)
@@ -193,6 +188,11 @@ static int parseConfigFile(char* path);
  * Non stampa nulla se client == NULL || req == NULL.
  */
 static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_request* req, int resp_code, unsigned long int bytes);
+
+/**
+ * \brief Risveglia ogni 2 secondi i thread che si trovano in stato di attesa sulla variabile di condizione lock_cmd_isNotLocked.
+ */
+static void* lock_cmd_broadcast(void* arg);
 
 /**
  * \brief Funzione eseguita dai thread worker.
@@ -452,8 +452,9 @@ int main(int argc, const char* argv[]) {
         return -1;
     }
     printf("Socket in ascolto.\n");
+    fflush(stdout);
     
-    // Crea i thread
+    // Crea i thread worker
     active_workers = config_file.worker_threads_num;
     pthread_t* threads = NULL;
     if((threads = malloc(sizeof(pthread_t)*config_file.worker_threads_num)) == NULL) {
@@ -480,8 +481,23 @@ int main(int argc, const char* argv[]) {
             return -1;
         }
     }
-    printf("Thread worker in esecuzione.\n");
-    fflush(stdout);
+    
+    // Crea il thread che risveglia ogni 2 secondi i thread che si trovano in stato di attesa sulla
+    // variabile di condizione lock_cmd_isNotLocked
+    pthread_t lock_cmd_broadcast_thread;
+    if(pthread_create(&lock_cmd_broadcast_thread, NULL, lock_cmd_broadcast, NULL) != 0) {
+        fprintf(stderr, "Errore: impossibile creare un nuovo thread.\n");
+        for(int i = 0; i < config_file.worker_threads_num; i++) {
+            pthread_detach(threads[i]);
+        }
+        destroyAll();
+        freeAll();
+        close(sfd);
+        closePipe();
+        free(threads);
+        closeLogFile();
+        return -1;
+    }
     
     // select
     int ready_descriptors_num;
@@ -516,6 +532,7 @@ int main(int argc, const char* argv[]) {
                 for(int i = 0; i < config_file.worker_threads_num; i++) {
                     pthread_detach(threads[i]);
                 }
+                pthread_detach(lock_cmd_broadcast_thread);
                 destroyAll();
                 freeAll();
                 close(sfd);
@@ -655,6 +672,8 @@ int main(int argc, const char* argv[]) {
     }
     free(threads);
     printf("Esecuzione dei thread worker terminata.\n");
+    
+    pthread_join(lock_cmd_broadcast_thread, NULL);
     
     destroyAll();
     
@@ -966,6 +985,41 @@ static void updateLogFile(int thread_id, const CLIENT client, const struct fsp_r
     // Scrive nel file di log e su stdout
     write(log_file, msg, strlen(msg));
     write(1, msg, strlen(msg));
+}
+
+static void* lock_cmd_broadcast(void* arg) {
+    // Maschera i segnali
+    sigset_t mask;
+    sigfillset(&mask);
+    if(pthread_sigmask(SIG_SETMASK, &mask, NULL) != 0) {
+        fprintf(stderr, "Errore: signal mask del thread che esegue la funzione lock_cmd_broadcast non modificata.\n");
+        return 0;
+    }
+    
+    struct timespec timeout;
+    memset(&timeout, 0, sizeof(timeout));
+    timeout.tv_sec = 2;
+    
+    while(1) {
+        nanosleep(&timeout, NULL);
+        
+        pthread_mutex_lock(&clients_mutex);
+        if(quit || (!accept_connections && clients->clients_num == 0)) {
+            pthread_mutex_unlock(&clients_mutex);
+            
+            pthread_mutex_lock(&files_mutex);
+            pthread_cond_broadcast(&lock_cmd_isNotLocked);
+            pthread_mutex_unlock(&files_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&clients_mutex);
+        
+        pthread_mutex_lock(&files_mutex);
+        pthread_cond_broadcast(&lock_cmd_isNotLocked);
+        pthread_mutex_unlock(&files_mutex);
+    }
+    
+    return 0;
 }
 
 static void* worker(void* arg) {
@@ -1479,31 +1533,24 @@ static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_res
             // Setta la lock
             file->locked = client->sfd;
         } else {
-            
-            pthread_mutex_lock(&clients_mutex);
-            locked_threads++;
-            if(active_workers > 1 && locked_threads == active_workers) {
-                cannotLock = 1;
-                locked_threads--;
+            struct timespec start, end;
+            clock_gettime(CLOCK_REALTIME, &start);
+            // Attende di ottenere la lock su una variabile di condizione
+            while(file->locked >= 0 && !file->remove && !quit) {
+                clock_gettime(CLOCK_REALTIME, &end);
+                if(end.tv_sec - start.tv_sec >= 4) {
+                    // Non attende la lock per più di 4 secondi
+                    cannotLock = 1;
+                    break;
+                }
+                pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
             }
-            pthread_mutex_unlock(&clients_mutex);
             
-            if(!cannotLock) {
-                // Attende di ottenere la lock su una variabile di condizione
-                while(file->locked >= 0 && !file->remove) {
-                    pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
-                }
-                
-                pthread_mutex_lock(&clients_mutex);
-                locked_threads--;
-                pthread_mutex_unlock(&clients_mutex);
-                
-                if(file->remove) {
-                    file = NULL;
-                    pthread_cond_broadcast(&lock_cmd_isNotLocked);
-                } else {
-                    file->locked = client->sfd;
-                }
+            if(file->remove) {
+                file = NULL;
+                pthread_cond_broadcast(&lock_cmd_isNotLocked);
+            } else if(!quit && !cannotLock){
+                file->locked = client->sfd;
             }
         }
     }
@@ -1516,7 +1563,7 @@ static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_res
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(notOpened || cannotLock) {
+    if(notOpened || quit || cannotLock) {
         // File non aperto dal client o impossibile ottenere la lock
         resp->code = 556;
         strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
@@ -1754,38 +1801,34 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
         } else if(file->locked == client->sfd) {
             // Il client detiene già la lock sul file
         } else {
-            
-            pthread_mutex_lock(&clients_mutex);
-            locked_threads++;
-            if(active_workers > 1 && locked_threads == active_workers) {
-                cannotLock = 1;
-                locked_threads--;
+            struct timespec start, end;
+            clock_gettime(CLOCK_REALTIME, &start);
+            // Attende di ottenere la lock su una variabile di condizione
+            while(file->locked >= 0 && !file->remove && !quit) {
+                clock_gettime(CLOCK_REALTIME, &end);
+                if(end.tv_sec - start.tv_sec >= 4) {
+                    // Non attende la lock per più di 4 secondi
+                    cannotLock = 1;
+                    break;
+                }
+                pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
             }
-            pthread_mutex_unlock(&clients_mutex);
             
-            if(!cannotLock) {
-                // Attende di ottenere la lock su una variabile di condizione
-                while(file->locked >= 0 && !file->remove) {
-                    pthread_cond_wait(&lock_cmd_isNotLocked, &files_mutex);
+            if(file->remove) {
+                file->links--;
+                fsp_files_list_remove(&(client->openedFiles), req->arg);
+                // Rimuove il file se links == 0
+                if(file->links == 0) {
+                    fsp_files_hash_table_delete(files, req->arg);
+                    fsp_file_free(file);
                 }
-                
-                pthread_mutex_lock(&clients_mutex);
-                locked_threads--;
-                pthread_mutex_unlock(&clients_mutex);
-                
-                if(file->remove) {
-                    file->links--;
-                    fsp_files_list_remove(&(client->openedFiles), req->arg);
-                    // Rimuove il file se links == 0
-                    if(file->links == 0) {
-                        fsp_files_hash_table_delete(files, req->arg);
-                        fsp_file_free(file);
-                    }
-                    file = NULL;
-                    pthread_cond_broadcast(&lock_cmd_isNotLocked);
-                } else {
-                    file->locked = client->sfd;
-                }
+                file = NULL;
+                pthread_cond_broadcast(&lock_cmd_isNotLocked);
+            } else if(quit || cannotLock){
+                file->links--;
+                fsp_files_list_remove(&(client->openedFiles), req->arg);
+            } else {
+                file->locked = client->sfd;
             }
         }
     }
@@ -1798,7 +1841,7 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
         resp->description[descr_max_len-1] = '\0';
         return 0;
     }
-    if(cannotLock) {
+    if(quit || cannotLock) {
         // Impossibile ottenere la lock
         resp->code = 556;
         strncpy(resp->description, "Cannot perform the operation.", descr_max_len);
