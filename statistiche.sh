@@ -264,10 +264,6 @@ grep -e ' SUCCESS' -e ' FAILURE' $logfile | cut -d ' ' -f 2 |
 echo
 
 # Massimo numero di connessioni contemporanee
-# Il numero massimo di connessioni contemporanee viene calcolato tenendo conto anche
-# delle connessioni che il server non accetta in quanto superano il limite stabilito.
-# Per tale motivo il valore potrebbe anche superare quello di MAX_CONN definito nel
-# file di configurazione config.txt.
 grep -e ' CONNECTION_OPENED: ' -e ' CONNECTION_CLOSED: ' $logfile |
 {
     max_conn=0

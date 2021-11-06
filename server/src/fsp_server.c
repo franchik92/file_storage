@@ -579,42 +579,41 @@ int main(int argc, const char* argv[]) {
                             
                             continue;
                         }
-                        
-                        int serviceNotAvailable = 0;
+
                         pthread_mutex_lock(&clients_mutex);
-                        if(clients->clients_num > config_file.max_conn) {
-                            serviceNotAvailable = 1;
-                        } else {
-                            // Aggiunge il client alla tabella hash
-                            fsp_clients_hash_table_insert(clients, client);
-                        }
-                        pthread_mutex_unlock(&clients_mutex);
-                        
-                        if(serviceNotAvailable) {
+                        if(clients->clients_num == config_file.max_conn-1) {
                             // Invia il messaggio di risposta fsp con codice 421
                             sendFspResp(client, 421, "Service not available, closing connection.", 0, NULL);
                             close(fd_c);
+                            fsp_client_free(client);
                             
                             // Scrive nel file di log e su stdout
                             snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d (service not available)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                             write(log_file, msg, strlen(msg));
                             write(1, msg, strlen(msg));
                         } else {
+                            // Aggiunge il client alla tabella hash
+                            fsp_clients_hash_table_insert(clients, client);
+
                             // Invia il messaggio di risposta fsp con codice 220
                             if(sendFspResp(client, 220, "Service ready.", 0, NULL) != 0) {
                                 close(fd_c);
+                                fsp_clients_hash_table_delete(clients, fd_c);
+                                fsp_client_free(client);
                                 
                                 // Scrive nel file di log e su stdout
                                 snprintf(msg, LOG_FILE_MSG_LEN, "%d:%d:%d CONNECTION_CLOSED: %d (internal error)\n", current_time->tm_hour, current_time->tm_min, current_time->tm_sec, fd_c);
                                 write(log_file, msg, strlen(msg));
                                 write(1, msg, strlen(msg));
-                                
+
+                                pthread_mutex_unlock(&clients_mutex);
                                 continue;
                             }
                             
                             FD_SET(fd_c, &set);
                             if(fd_c > fd_max) fd_max = fd_c;
                         }
+                        pthread_mutex_unlock(&clients_mutex);
                     } else if(fd == pfd[0]) {
                         // Descrittore da aggiungere nuovamente (comunicato da un thread worker)
                         int fd_c;
@@ -734,11 +733,8 @@ static void removeClient(CLIENT client) {
 
 static void closeConnection(CLIENT client, const char* error_descr) {
     if(client == NULL) return;
-    
+
     pthread_mutex_lock(&clients_mutex);
-    fsp_clients_hash_table_delete(clients, client->sfd);
-    close(client->sfd);
-    pthread_mutex_unlock(&clients_mutex);
     
     // Chiude i file aperti dal client
     pthread_mutex_lock(&files_mutex);
@@ -762,7 +758,10 @@ static void closeConnection(CLIENT client, const char* error_descr) {
         }
     }
     pthread_mutex_unlock(&files_mutex);
-    
+
+    close(client->sfd);
+    fsp_clients_hash_table_delete(clients, client->sfd);
+
     // Scrive nel file di log e su stdout
     time_t t = time(NULL);
     struct tm* current_time = localtime(&t);
@@ -776,8 +775,9 @@ static void closeConnection(CLIENT client, const char* error_descr) {
         write(log_file, msg, strlen(msg));
         write(1, msg, strlen(msg));
     }
-    
+
     fsp_client_free(client);
+    pthread_mutex_unlock(&clients_mutex);
 }
 
 static void signalHandler(int signal) {
