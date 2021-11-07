@@ -1063,8 +1063,8 @@ static int read_opt(char* arg, char* dirname, const struct timespec time, int p,
             }
         }
         
-        // Salva nella cartella il file se dirname != NULL
-        if(dirname != NULL && retVal == 0) {
+        if(dirname != NULL && retVal == 0 && buf_size > 0) {
+            // Salva nella cartella dirname il file
             unsigned long dirname_len = strlen(dirname);
             unsigned long file_len = strlen(file);
             
@@ -1135,7 +1135,7 @@ static int read_opt(char* arg, char* dirname, const struct timespec time, int p,
         }
         
         // Libera dalla memoria buf e attende time secondi prima di eseguire la prossima operazione
-        if(retVal == 0) {
+        if(retVal == 0 && buf_size > 0) {
             free(buf);
             buf = NULL;
         }

@@ -101,7 +101,8 @@ int openFile(const char* pathname, int flags, const char* dirname);
  *
  * Se il file pathname esiste, allora ritorna un puntatore ad un'area allocata sullo heap nel
  * parametro buf, mentre size conterrà la dimensione del buffer dati (ossia la dimensione in bytes del
- * file letto). In caso di errore, buf e size non sono validi.
+ * file letto). Se la dimensione *size del file letto è zero, allora *buf sarà uguale a NULL.
+ * In caso di errore, buf e size non sono validi.
  * \return 0 in caso di successo,
  *         -1 in caso di fallimento, errno viene settato opportunamente.
  *

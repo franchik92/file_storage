@@ -1376,17 +1376,19 @@ static unsigned long int append_cmd(CLIENT client, const struct fsp_request* req
             if(fsp_files_list_contains(client->openedFiles, req->arg) && file->data != NULL) {
                 // Il file è stato aperto dal client senza flag O_CREATE
                 if(file->locked < 0 || file->locked == client->sfd) {
-                    // Il client detiene la lock sul file
-                    void* _data = file->data;
-                    if((file->data = realloc(file->data, file->size + parsed_data->size)) == NULL) {
-                        file->data = _data;
-                        fsp_parser_freeData(parsed_data);
-                        pthread_mutex_unlock(&files_mutex);
-                        return -1;
+                    // Nessuno detiene la lock sul file oppure la detiene il client
+                    if(parsed_data->size > 0) {
+                        void* _data = file->data;
+                        if((file->data = realloc(file->data, file->size + parsed_data->size)) == NULL) {
+                            file->data = _data;
+                            fsp_parser_freeData(parsed_data);
+                            pthread_mutex_unlock(&files_mutex);
+                            return -1;
+                        }
+                        memcpy((file->data) + file->size, parsed_data->data, parsed_data->size);
+                        file->size += parsed_data->size;
+                        storage_size += parsed_data->size;
                     }
-                    memcpy((file->data) + file->size, parsed_data->data, parsed_data->size);
-                    file->size += parsed_data->size;
-                    storage_size += parsed_data->size;
                     
                     // Espelle i file dalla memoria se necessario
                     if(storage_size > config_file.storage_max_size) {
@@ -2182,14 +2184,16 @@ static unsigned long int write_cmd(CLIENT client, const struct fsp_request* req,
             // Il file è stato aperto dal client con flag O_CREATE
             if(file->locked >= 0 && file->locked == client->sfd) {
                 // Il client detiene la lock sul file
-                if((file->data = malloc(parsed_data->size)) == NULL) {
-                    fsp_parser_freeData(parsed_data);
-                    pthread_mutex_unlock(&files_mutex);
-                    return -1;
+                if(parsed_data->size > 0) {
+                    if((file->data = malloc(parsed_data->size)) == NULL) {
+                        fsp_parser_freeData(parsed_data);
+                        pthread_mutex_unlock(&files_mutex);
+                        return -1;
+                    }
+                    memcpy(file->data, parsed_data->data, parsed_data->size);
+                    file->size = parsed_data->size;
+                    storage_size += parsed_data->size;
                 }
-                memcpy(file->data, parsed_data->data, parsed_data->size);
-                file->size = parsed_data->size;
-                storage_size += parsed_data->size;
                 
                 // Espelle i file dalla memoria se necessario
                 if(storage_size > config_file.storage_max_size) {

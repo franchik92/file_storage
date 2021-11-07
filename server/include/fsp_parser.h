@@ -118,11 +118,12 @@ int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data** parsed_d
  *
  * *buf deve essere allocato nello heap. Se necessario rialloca la memoria di *buf nello heap
  * (*buf e *size vengono modificati di conseguenza). La massima dimensione del buffer è definita in FSP_PARSER_BUF_MAX_SIZE.
- * Aggiunge a *buf i campi pathname (PATHNAME), data_size (SIZE) e data (data).
+ * Aggiunge a *buf i campi pathname (PATHNAME), data_size (SIZE) e data (data). Se data == NULL, allora il campo relativo
+ * al dato sarà vuoto (data_size deve essere uguale a zero).
  * Inizia a scrivere a partire da (*buf)[offset].
  * Il comportamento è indefinito se la dimensione del dato data_size è superiore a quella effettiva in data.
  * \return valore maggiore o uguale a 0 in caso di successo (tale valore indica il numero di byte scritti in *buf),
- *         -1 se buf == NULL || *buf == NULL || size == NULL || offset < 0 || pathname == NULL || data_size < 0 || (data_size > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE || data == NULL,
+ *         -1 se buf == NULL || *buf == NULL || size == NULL || offset < 0 || pathname == NULL || data_size < 0 || (data_size > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE,
  *         -2 se non è stato possibile riallocare la memoria per *buf.
  */
 long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset, const char* pathname, size_t data_size, void* data);

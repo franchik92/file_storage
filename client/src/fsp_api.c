@@ -262,12 +262,16 @@ int readFile(const char* pathname, void** buf, size_t* size) {
         return -1;
     }
     
-    if((*buf = malloc(parsed_data->size)) == NULL) {
-        fsp_parser_freeData(parsed_data);
-        errno = ENOBUFS;
-        return -1;
+    if(parsed_data->size > 0) {
+        if((*buf = malloc(parsed_data->size)) == NULL) {
+            fsp_parser_freeData(parsed_data);
+            errno = ENOBUFS;
+            return -1;
+        }
+        memcpy(*buf, parsed_data->data, parsed_data->size);
+    } else {
+        *buf = NULL;
     }
-    memcpy(*buf, parsed_data->data, parsed_data->size);
     *size = parsed_data->size;
     
     fsp_parser_freeData(parsed_data);
@@ -728,6 +732,11 @@ static int saveData(const char* dirname, size_t data_len, void* data) {
     int data_num = 0;
     
     while(_parsed_data != NULL) {
+        if(_parsed_data->size <= 0) {
+            _parsed_data = _parsed_data->next;
+            continue;
+        }
+        
         FILE* file;
         char* pathname = _parsed_data->pathname;
         unsigned int dirname_len = (unsigned int) strlen(dirname);
@@ -760,14 +769,16 @@ static int saveData(const char* dirname, size_t data_len, void* data) {
         filename[dirname_len+pathname_len] = '\0';
         
         if((file = fopen(filename, "wb")) != NULL) {
-            size_t bytes;
-            bytes = fwrite(_parsed_data->data, 1, _parsed_data->size, file);
-            if(bytes != _parsed_data->size) {
-                fsp_parser_freeData(parsed_data);
-                fclose(file);
-                free(filename);
-                errno = EIO;
-                return -1;
+            if(_parsed_data->size > 0) {
+                size_t bytes;
+                bytes = fwrite(_parsed_data->data, 1, _parsed_data->size, file);
+                if(bytes != _parsed_data->size) {
+                    fsp_parser_freeData(parsed_data);
+                    fclose(file);
+                    free(filename);
+                    errno = EIO;
+                    return -1;
+                }
             }
         } else {
             fsp_parser_freeData(parsed_data);

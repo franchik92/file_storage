@@ -417,7 +417,7 @@ int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data** parsed_d
         if(*end == ' ') {
             *end = '\0';
             long int size;
-            if(!isNumber(start, &size) || size <= 0) {
+            if(!isNumber(start, &size) || size < 0) {
                 fsp_parser_freeData(*parsed_data);
                 *parsed_data = NULL;
                 return -3;
@@ -473,7 +473,7 @@ int fsp_parser_parseData(size_t data_len, void* data, struct fsp_data** parsed_d
 }
 
 long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset, const char* pathname, size_t data_size, void* data) {
-    if(buf == NULL || *buf == NULL || size == NULL || offset < 0 || pathname == NULL || data_size < 0 || (data_size > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE || data == NULL) {
+    if(buf == NULL || *buf == NULL || size == NULL || offset < 0 || pathname == NULL || data_size < 0 || (data_size > 0 && data == NULL) || *size > FSP_PARSER_BUF_MAX_SIZE) {
         return -1;
     }
     
@@ -514,8 +514,10 @@ long int fsp_parser_makeData(void** buf, size_t* size, unsigned long int offset,
     _buf += data_size_str_len;
     *_buf = ' ';
     _buf++;
-    memcpy(_buf, data, data_size);
-    _buf += data_size;
+    if(data != NULL) {
+        memcpy(_buf, data, data_size);
+        _buf += data_size;
+    }
     *_buf = ' ';
     
     return tot_len;
