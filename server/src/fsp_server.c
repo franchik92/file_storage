@@ -41,6 +41,8 @@
 #define FSP_CLIENTS_HASH_TABLE_SIZE 97
 // Lunghezza di un messaggio di log
 #define LOG_FILE_MSG_LEN 512
+// Tempo massimo di attesa per la lock (in secondi)
+#define LOCK_WAIT_MAX_TIME 4
 
 // File
 typedef struct fsp_file* FSP_FILE;
@@ -1540,8 +1542,8 @@ static int lock_cmd(CLIENT client, const struct fsp_request* req, struct fsp_res
             // Attende di ottenere la lock su una variabile di condizione
             while(file->locked >= 0 && !file->remove && !quit) {
                 clock_gettime(CLOCK_REALTIME, &end);
-                if(end.tv_sec - start.tv_sec >= 4) {
-                    // Non attende la lock per più di 4 secondi
+                if(end.tv_sec - start.tv_sec >= LOCK_WAIT_MAX_TIME) {
+                    // Non attende la lock per più di LOCK_WAIT_MAX_TIME secondi
                     cannotLock = 1;
                     break;
                 }
@@ -1808,8 +1810,8 @@ static int openl_cmd(CLIENT client, const struct fsp_request* req, struct fsp_re
             // Attende di ottenere la lock su una variabile di condizione
             while(file->locked >= 0 && !file->remove && !quit) {
                 clock_gettime(CLOCK_REALTIME, &end);
-                if(end.tv_sec - start.tv_sec >= 4) {
-                    // Non attende la lock per più di 4 secondi
+                if(end.tv_sec - start.tv_sec >= LOCK_WAIT_MAX_TIME) {
+                    // Non attende la lock per più di LOCK_WAIT_MAX_TIME secondi
                     cannotLock = 1;
                     break;
                 }
